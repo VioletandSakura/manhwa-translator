@@ -39,6 +39,7 @@ def test_controller_processes_folder_as_persistent_offline_batch(tmp_path: Path,
     window._selected_sources = [chapter]
     window.source_edit.setText(str(chapter))
     window.output_edit.setText(str(tmp_path / "out"))
+    window.batch_name_edit.setText("测试漫画")
     window.translate_checkbox.setChecked(False)
     captured = {}
 
@@ -53,13 +54,39 @@ def test_controller_processes_folder_as_persistent_offline_batch(tmp_path: Path,
 
     assert application.database.get_task(task_id).status is TaskStatus.COMPLETED
     assert window.queue_table.rowCount() == 2
-    assert len(list((tmp_path / "out" / "translated").glob("*.png"))) == 2
+    task = application.database.get_task(task_id)
+    assert Path(task.output_dir) == tmp_path / "out" / "测试漫画"
+    batch_output = tmp_path / "out" / "测试漫画"
+    assert len(list((batch_output / "original").glob("*.png"))) == 2
+    assert len(list((batch_output / "inpainted").glob("*.png"))) == 2
+    assert len(list((batch_output / "translated").glob("*.png"))) == 2
+    assert len(list((batch_output / "metadata").glob("*.json"))) == 2
 
     controller.resume_batch()
 
     assert application.database.get_task(task_id).status is TaskStatus.COMPLETED
     assert window.stage_label.text().endswith("完成")
     assert not window.resume_button.isEnabled()
+
+
+def test_controller_requires_batch_name_before_creating_folder_task(tmp_path: Path, qtbot, monkeypatch) -> None:
+    application = _application(tmp_path)
+    chapter = tmp_path / "chapter"
+    chapter.mkdir()
+    Image.new("RGB", (40, 40), "white").save(chapter / "1.png")
+    window = MainWindow(application.paths)
+    qtbot.addWidget(window)
+    controller = MainController(application, window)
+    window._selected_sources = [chapter]
+    window.source_edit.setText(str(chapter))
+    window.output_edit.setText(str(tmp_path / "out"))
+    errors: list[str] = []
+    monkeypatch.setattr(window, "show_error", errors.append)
+
+    controller.start_translation()
+
+    assert errors == ["多图、文件夹、ZIP 或 EPUB 任务必须填写批次名称。"]
+    assert application.database.list_tasks() == []
 
 
 def test_controller_saves_local_content_preset_and_api_channel(tmp_path: Path, qtbot) -> None:

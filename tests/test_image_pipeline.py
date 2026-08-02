@@ -48,7 +48,7 @@ def _make_page(path: Path) -> None:
 
 
 def test_page_pipeline_saves_separate_intermediate_artifacts(tmp_path: Path) -> None:
-    source = tmp_path / "001.png"
+    source = tmp_path / "第001页.png"
     _make_page(source)
     progress: list[tuple[str, int]] = []
     pipeline = PagePipeline(
@@ -62,7 +62,7 @@ def test_page_pipeline_saves_separate_intermediate_artifacts(tmp_path: Path) -> 
     result = asyncio.run(
         pipeline.process(
             source,
-            tmp_path / "output",
+            tmp_path / "中文批次",
             PipelineOptions(),
             on_progress=lambda stage, value: progress.append((stage, value)),
         )

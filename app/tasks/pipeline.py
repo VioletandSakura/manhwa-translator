@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 import cv2
+import numpy as np
 
 from app.detection.base import TextDetector
 from app.domain.models import PageArtifacts, TextRegion
@@ -47,7 +48,7 @@ class PagePipeline:
         source_path = Path(source_path)
         if source_path.suffix.lower() not in self.SUPPORTED_EXTENSIONS:
             raise ValueError(f"不支持的图片格式: {source_path.suffix}")
-        image = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        image = self._read_image(source_path)
         if image is None:
             raise ValueError(f"无法读取图片: {source_path}")
         artifacts = self._prepare_artifacts(source_path, Path(output_dir))
@@ -75,10 +76,10 @@ class PagePipeline:
                     region.translated_text = translated_text
         self._progress(on_progress, "擦字", 75)
         inpainted = await self.inpainter.inpaint(image, processing_regions)
-        cv2.imwrite(str(artifacts.inpainted), inpainted)
+        self._write_image(artifacts.inpainted, inpainted)
         self._progress(on_progress, "渲染", 90)
         rendered = await self.renderer.render(inpainted, processing_regions)
-        cv2.imwrite(str(artifacts.translated), rendered)
+        self._write_image(artifacts.translated, rendered)
         self._save_metadata(artifacts.metadata, source_path, options, regions)
         self._progress(on_progress, "保存", 100)
         return PipelineResult(artifacts=artifacts, regions=regions)
@@ -90,6 +91,18 @@ class PagePipeline:
             directory.mkdir(parents=True, exist_ok=True)
         stem = source_path.stem
         return PageArtifacts(original=directories["original"] / source_path.name, inpainted=directories["inpainted"] / f"{stem}_inpainted.png", translated=directories["translated"] / f"{stem}_translated.png", metadata=directories["metadata"] / f"{stem}.json")
+
+    @staticmethod
+    def _read_image(path: Path) -> np.ndarray | None:
+        encoded = np.frombuffer(path.read_bytes(), dtype=np.uint8)
+        return cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+
+    @staticmethod
+    def _write_image(path: Path, image: np.ndarray) -> None:
+        succeeded, encoded = cv2.imencode(path.suffix or ".png", image)
+        if not succeeded:
+            raise ValueError(f"无法编码图片: {path.name}")
+        path.write_bytes(encoded.tobytes())
 
     @staticmethod
     def _save_metadata(path: Path, source_path: Path, options: PipelineOptions, regions: list[TextRegion]) -> None:

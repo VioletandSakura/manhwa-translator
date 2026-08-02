@@ -14,6 +14,7 @@ def test_main_window_uses_chinese_and_deepseek_defaults(qtbot) -> None:
     assert window.api_model.currentText() == "deepseek-v4-flash"
     assert window.api_key.echoMode().name == "Password"
     assert window.output_edit.text() == str(AppPaths.default().output_root)
+    assert "多图" in window.batch_name_edit.placeholderText()
 
 
 def test_progress_updates_stage_and_value(qtbot) -> None:

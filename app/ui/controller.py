@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QFileDialog
 
 from app.security.redaction import redact_text
 from app.services.application import ProcessingOutcome, TranslationApplication
+from app.services.output_paths import batch_requires_name, resolve_batch_output
 from app.services.text_exchange import TextExchangeService
 from app.tasks.pipeline import PipelineOptions
 
@@ -263,12 +264,21 @@ class MainController(QObject):
     @Slot()
     def start_translation(self) -> None:
         sources = self.window.selected_sources()
-        output_dir = Path(self.window.output_edit.text().strip())
+        output_text = self.window.output_edit.text().strip()
         if not sources or any(not source.exists() for source in sources):
             self.window.show_error("请选择有效的漫画图片、文件夹、ZIP或EPUB。")
             return
-        if not str(output_dir):
+        if not output_text:
             self.window.show_error("请选择输出目录。")
+            return
+        try:
+            output_dir = resolve_batch_output(
+                Path(output_text),
+                self.window.batch_name_edit.text(),
+                require_name=batch_requires_name(sources),
+            )
+        except ValueError as error:
+            self.window.show_error(str(error))
             return
         source_path = sources[0]
         if source_path.is_file() and source_path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
