@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import unicodedata
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
@@ -56,19 +57,27 @@ class PagePipeline:
         self._progress(on_progress, "OCR", 30)
         regions = await self.ocr.recognize(image, regions)
         for region in regions:
-            region.needs_review = region.confidence < options.review_threshold
+            region.needs_review = region.needs_review or region.confidence < options.review_threshold
+            exclusion_reason = self._review_exclusion_reason(region.source_text)
+            if exclusion_reason is not None:
+                region.needs_review = True
+                region.metadata["auto_processing_excluded_reason"] = exclusion_reason
+        processing_regions = [
+            region
+            for region in regions
+            if region.source_text.strip() and not region.needs_review
+        ]
         if options.translate:
             self._progress(on_progress, "翻译", 55)
-            active_regions = [region for region in regions if region.source_text.strip()]
-            if active_regions:
-                translations = await self.translator.translate([region.source_text for region in active_regions], options.source_language, options.target_language)
-                for region, translated_text in zip(active_regions, translations, strict=True):
+            if processing_regions:
+                translations = await self.translator.translate([region.source_text for region in processing_regions], options.source_language, options.target_language)
+                for region, translated_text in zip(processing_regions, translations, strict=True):
                     region.translated_text = translated_text
         self._progress(on_progress, "擦字", 75)
-        inpainted = await self.inpainter.inpaint(image, regions)
+        inpainted = await self.inpainter.inpaint(image, processing_regions)
         cv2.imwrite(str(artifacts.inpainted), inpainted)
         self._progress(on_progress, "渲染", 90)
-        rendered = await self.renderer.render(inpainted, regions)
+        rendered = await self.renderer.render(inpainted, processing_regions)
         cv2.imwrite(str(artifacts.translated), rendered)
         self._save_metadata(artifacts.metadata, source_path, options, regions)
         self._progress(on_progress, "保存", 100)
@@ -92,3 +101,14 @@ class PagePipeline:
         if callback is not None:
             callback(stage, value)
 
+    @staticmethod
+    def _review_exclusion_reason(text: str) -> str | None:
+        normalized = text.strip()
+        if len(normalized) == 1 and normalized.isascii() and normalized.isalnum():
+            return "isolated_ascii_alphanumeric"
+        if normalized and not any(
+            unicodedata.category(character)[0] in {"L", "N"}
+            for character in normalized
+        ):
+            return "punctuation_or_symbol_only"
+        return None
