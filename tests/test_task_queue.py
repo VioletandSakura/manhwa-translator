@@ -56,6 +56,20 @@ def test_queue_can_pause_before_page_and_continue(tmp_path: Path) -> None:
     assert processed.is_set()
 
 
+def test_queue_refuses_to_resume_task_with_only_completed_pages(tmp_path: Path) -> None:
+    database = Database(tmp_path / "app.db")
+    database.initialize()
+    task_id, page_ids = _task_with_pages(database, 1)
+    database.update_page_status(page_ids[0], PageStatus.COMPLETED, stage="保存", progress=100)
+    database.update_task_status(task_id, TaskStatus.RUNNING)
+    queue = PersistentTaskQueue(database, lambda *_args: None)
+
+    resumed = queue.resume(task_id)
+
+    assert resumed is False
+    assert database.get_task(task_id).status is TaskStatus.COMPLETED
+
+
 def test_failed_page_can_be_retried_and_attempt_count_is_persisted(tmp_path: Path) -> None:
     database = Database(tmp_path / "app.db")
     database.initialize()

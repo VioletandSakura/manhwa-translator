@@ -74,6 +74,7 @@ class MainWindow(QMainWindow):
         self.page_editor = PageEditorWidget()
         self.tabs.addTab(self.page_editor, "可视化编辑器")
         self._apply_style()
+        self.set_busy(False)
 
     def _build_translation_tab(self) -> QWidget:
         page = QWidget()
@@ -511,6 +512,9 @@ class MainWindow(QMainWindow):
 
     def set_busy(self, busy: bool) -> None:
         self.start_button.setEnabled(not busy)
+        self.pause_button.setEnabled(busy)
+        self.resume_button.setEnabled(busy)
+        self.cancel_button.setEnabled(busy)
         self.start_button.setText("处理中…" if busy else "开始翻译")
 
     def append_log(self, message: str) -> None:

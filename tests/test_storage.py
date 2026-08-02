@@ -34,6 +34,20 @@ def test_database_returns_incomplete_pages_for_resume(tmp_path: Path) -> None:
     assert [page.id for page in remaining] == [second]
 
 
+def test_database_repairs_running_task_when_all_pages_are_completed(tmp_path: Path) -> None:
+    database = Database(tmp_path / "app.db")
+    database.initialize()
+    task_id = database.create_task(source_path="page.png", output_dir="out")
+    page_id = database.add_page(task_id, 0, "page.png")
+    database.update_page_status(page_id, PageStatus.COMPLETED, stage="保存", progress=100)
+    database.update_task_status(task_id, TaskStatus.RUNNING)
+
+    repaired = database.repair_completed_task_statuses()
+
+    assert repaired == 1
+    assert database.get_task(task_id).status is TaskStatus.COMPLETED
+
+
 def test_translation_cache_uses_provider_model_and_languages(tmp_path: Path) -> None:
     database = Database(tmp_path / "app.db")
     database.initialize()
@@ -53,4 +67,3 @@ def test_translation_cache_uses_provider_model_and_languages(tmp_path: Path) -> 
         target_language="zh-Hans",
         source_text="こんにちは",
     ) == "你好"
-

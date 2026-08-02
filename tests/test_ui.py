@@ -26,6 +26,27 @@ def test_progress_updates_stage_and_value(qtbot) -> None:
     assert window.progress_bar.value() == 30
 
 
+def test_task_controls_are_enabled_only_while_busy(qtbot) -> None:
+    window = MainWindow(AppPaths.default())
+    qtbot.addWidget(window)
+
+    assert not window.pause_button.isEnabled()
+    assert not window.resume_button.isEnabled()
+    assert not window.cancel_button.isEnabled()
+
+    window.set_busy(True)
+
+    assert window.pause_button.isEnabled()
+    assert window.resume_button.isEnabled()
+    assert window.cancel_button.isEnabled()
+
+    window.set_busy(False)
+
+    assert not window.pause_button.isEnabled()
+    assert not window.resume_button.isEnabled()
+    assert not window.cancel_button.isEnabled()
+
+
 def test_second_stage_tabs_and_optional_engines_are_visible(qtbot) -> None:
     window = MainWindow(AppPaths.default())
     qtbot.addWidget(window)

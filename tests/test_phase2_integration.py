@@ -55,6 +55,12 @@ def test_controller_processes_folder_as_persistent_offline_batch(tmp_path: Path,
     assert window.queue_table.rowCount() == 2
     assert len(list((tmp_path / "out" / "translated").glob("*.png"))) == 2
 
+    controller.resume_batch()
+
+    assert application.database.get_task(task_id).status is TaskStatus.COMPLETED
+    assert window.stage_label.text().endswith("完成")
+    assert not window.resume_button.isEnabled()
+
 
 def test_controller_saves_local_content_preset_and_api_channel(tmp_path: Path, qtbot) -> None:
     application = _application(tmp_path)

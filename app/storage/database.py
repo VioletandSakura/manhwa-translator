@@ -215,6 +215,27 @@ class Database:
             )
             connection.commit()
 
+    def repair_completed_task_statuses(self) -> int:
+        with closing(self.connect()) as connection:
+            cursor = connection.execute(
+                """UPDATE tasks
+                SET status = ?, updated_at = ?
+                WHERE status != ?
+                  AND EXISTS (SELECT 1 FROM pages WHERE pages.task_id = tasks.id)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM pages
+                      WHERE pages.task_id = tasks.id AND pages.status != ?
+                  )""",
+                (
+                    TaskStatus.COMPLETED.value,
+                    _now(),
+                    TaskStatus.COMPLETED.value,
+                    PageStatus.COMPLETED.value,
+                ),
+            )
+            connection.commit()
+            return max(0, cursor.rowcount)
+
     def update_page_status(
         self,
         page_id: str,

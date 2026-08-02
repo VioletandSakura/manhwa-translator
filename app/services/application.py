@@ -73,6 +73,7 @@ class TranslationApplication:
     def initialize(self) -> None:
         self.paths.ensure_runtime_directories()
         self.database.initialize()
+        self.database.repair_completed_task_statuses()
 
     def save_api_config(self, values: dict[str, object]) -> None:
         service_name = str(values.get("service_name") or "").strip()

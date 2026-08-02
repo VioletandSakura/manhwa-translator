@@ -77,3 +77,16 @@ def test_process_page_updates_sqlite_checkpoints(tmp_path: Path) -> None:
     assert page.stage == "保存"
     assert page.progress == 100
 
+
+def test_application_startup_repairs_completed_task_left_running(tmp_path: Path) -> None:
+    application = _application(tmp_path)
+    task_id = application.database.create_task("page.png", "out")
+    page_id = application.database.add_page(task_id, 0, "page.png")
+    application.database.update_page_status(
+        page_id, PageStatus.COMPLETED, stage="保存", progress=100
+    )
+    application.database.update_task_status(task_id, TaskStatus.RUNNING)
+
+    application.initialize()
+
+    assert application.database.get_task(task_id).status is TaskStatus.COMPLETED

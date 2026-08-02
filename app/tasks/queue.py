@@ -42,10 +42,14 @@ class PersistentTaskQueue:
         self._event(task_id).clear()
         self.database.update_task_status(task_id, TaskStatus.PAUSED)
 
-    def resume(self, task_id: str) -> None:
+    def resume(self, task_id: str) -> bool:
+        if not self.database.list_resumable_pages(task_id):
+            self.database.repair_completed_task_statuses()
+            return False
         self._paused_tasks.discard(task_id)
         self._event(task_id).set()
         self.database.update_task_status(task_id, TaskStatus.RUNNING)
+        return True
 
     def cancel(self, task_id: str) -> None:
         self._cancelled_tasks.add(task_id)

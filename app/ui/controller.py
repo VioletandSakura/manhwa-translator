@@ -383,7 +383,18 @@ class MainController(QObject):
     @Slot()
     def resume_batch(self) -> None:
         if self._active_queue is not None and self._active_task_id is not None:
-            self._active_queue.resume(self._active_task_id)
+            resumed = self._active_queue.resume(self._active_task_id)
+            if not resumed:
+                task = self.application.database.get_task(self._active_task_id)
+                is_completed = task.status.value == "completed"
+                self.window.set_progress(
+                    "完成" if is_completed else task.status.value,
+                    100 if is_completed else self.window.progress_bar.value(),
+                )
+                self.window.append_log("任务已经完成，没有需要继续处理的页面")
+                self.window.set_history(self.application.database.list_tasks())
+                self.window.set_busy(False)
+                return
             self.window.set_progress("继续处理中", self.window.progress_bar.value())
 
     @Slot()
