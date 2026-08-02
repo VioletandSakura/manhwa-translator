@@ -35,6 +35,7 @@ def test_deepseek_translation_uses_chat_completions_without_images() -> None:
     payload = json.loads(captured_request.content)
     assert captured_request.url.path.endswith("/chat/completions")
     assert payload["model"] == "deepseek-v4-flash"
+    assert "json" in " ".join(message["content"] for message in payload["messages"]).casefold()
     assert "image_url" not in captured_request.content.decode("utf-8")
     asyncio.run(client.aclose())
 
@@ -151,6 +152,28 @@ def test_translation_accepts_json_code_fence() -> None:
     content = '```json\n{"translations":["你好"]}\n```'
 
     assert OpenAICompatibleTranslator._parse_translations(content) == ["你好"]
+
+
+def test_custom_system_prompt_is_augmented_for_json_mode() -> None:
+    translator = OpenAICompatibleTranslator(OpenAICompatibleConfig.deepseek(api_key="secret-key"))
+
+    payload = translator._build_payload(["こんにちは"], "ja", "zh-Hans", "忠实翻译", None)
+
+    assert "json" in payload["messages"][0]["content"].casefold()
+    asyncio.run(translator.close())
+
+
+def test_http_400_includes_redacted_provider_reason() -> None:
+    response = httpx.Response(
+        400,
+        json={"error": {"message": "Prompt must contain JSON; token=secret-value-123456"}},
+    )
+
+    with pytest.raises(TranslationServiceError) as captured:
+        OpenAICompatibleTranslator._raise_for_status(response)
+
+    assert "Prompt must contain JSON" in str(captured.value)
+    assert "secret-value-123456" not in str(captured.value)
 
 
 @pytest.mark.parametrize(

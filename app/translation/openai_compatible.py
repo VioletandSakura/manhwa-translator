@@ -89,7 +89,7 @@ class OpenAICompatibleTranslator:
         source_language: str,
         target_language: str,
         *,
-        system_prompt: str = "你是专业漫画翻译员。忠实、自然地翻译，不添加解释。",
+        system_prompt: str = "你是专业漫画翻译员。忠实、自然地翻译，不添加解释，只输出JSON对象。",
         context: list[str] | None = None,
     ) -> list[str]:
         if not texts:
@@ -115,6 +115,8 @@ class OpenAICompatibleTranslator:
         system_prompt: str,
         context: list[str] | None,
     ) -> dict[str, Any]:
+        if "json" not in system_prompt.casefold():
+            system_prompt = f"{system_prompt.rstrip()} 只输出JSON对象，不要输出Markdown代码块或额外解释。"
         request_data = {
             "source_language": source_language,
             "target_language": target_language,
@@ -168,6 +170,14 @@ class OpenAICompatibleTranslator:
             message = "翻译服务暂时不可用"
         if message is None:
             message = f"翻译请求失败（HTTP {response.status_code}）"
+        try:
+            provider_message = response.json().get("error", {}).get("message")
+        except (AttributeError, TypeError, json.JSONDecodeError):
+            provider_message = None
+        if provider_message:
+            safe_detail = redact_text(str(provider_message)).strip()[:300]
+            if safe_detail:
+                message = f"{message}；服务端说明：{safe_detail}"
         raise TranslationServiceError(message)
 
     @staticmethod
