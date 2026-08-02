@@ -1,0 +1,17 @@
+.venv/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+data/*.db*
+data/tasks/
+logs/
+outputs/
+models/*
+!models/manifest.json
+fonts/*
+!fonts/.gitkeep
+.env
+*.key

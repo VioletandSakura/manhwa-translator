@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "rapidocr-default",
+      "purpose": "本地文字识别",
+      "status": "installed_in_project_venv",
+      "install_group": "ocr",
+      "storage": "D:\\Chatgpt\\01_Projects\\manga-translator-personal\\models",
+      "automatic_download": false,
+      "installed_size_mb": 30.28,
+      "files": [
+        ".venv/Lib/site-packages/rapidocr/models/PP-OCRv6_det_small.onnx",
+        ".venv/Lib/site-packages/rapidocr/models/ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+        ".venv/Lib/site-packages/rapidocr/models/PP-OCRv6_rec_small.onnx"
+      ]
+    }
+  ]
+}
