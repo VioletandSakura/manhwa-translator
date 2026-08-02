@@ -36,6 +36,16 @@ def test_application_creates_one_persistent_task_for_imported_chapter(tmp_path: 
     assert batch.page_count == 2
 
 
+def test_application_reuses_rapidocr_engine_across_pipeline_builds(tmp_path: Path) -> None:
+    application = _application(tmp_path)
+
+    first = application.build_pipeline(translate=False, ocr_engine="rapidocr")
+    second = application.build_pipeline(translate=False, ocr_engine="rapidocr")
+
+    assert first.ocr is second.ocr
+    assert first.detector.ocr is second.detector.ocr
+
+
 def test_saving_legacy_api_form_also_creates_default_channel(tmp_path: Path) -> None:
     application = _application(tmp_path)
 

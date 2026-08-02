@@ -69,6 +69,7 @@ class TranslationApplication:
         self.database = database or Database(paths.database_path)
         self.credentials = credentials or CredentialStore()
         self.logger = logger or SafeLogger(paths.logs_dir / "app.log")
+        self._rapidocr_engine: RapidOCREngine | None = None
 
     def initialize(self) -> None:
         self.paths.ensure_runtime_directories()
@@ -303,7 +304,7 @@ class TranslationApplication:
         inpainting_engine: str = "opencv",
     ) -> PagePipeline:
         translator = self.build_translator() if translate else _UnusedTranslator()
-        detector_ocr = RapidOCREngine()
+        detector_ocr = self._get_rapidocr_engine()
         ocr = (
             MangaOCREngine(self.paths.models_dir / "manga-ocr-base")
             if ocr_engine == "mangaocr"
@@ -325,6 +326,11 @@ class TranslationApplication:
             inpainter=inpainter,
             renderer=PillowTextRenderer(),
         )
+
+    def _get_rapidocr_engine(self) -> RapidOCREngine:
+        if self._rapidocr_engine is None:
+            self._rapidocr_engine = RapidOCREngine()
+        return self._rapidocr_engine
 
     def build_task_queue(
         self,
