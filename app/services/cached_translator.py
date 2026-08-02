@@ -42,3 +42,7 @@ class CachedTranslator:
                 )
         return [resolved[text] for text in texts]
 
+    async def close(self) -> None:
+        close = getattr(self.delegate, "close", None)
+        if close is not None:
+            await close()

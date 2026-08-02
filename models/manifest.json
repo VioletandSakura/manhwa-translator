@@ -14,6 +14,26 @@
         ".venv/Lib/site-packages/rapidocr/models/ch_ppocr_mobile_v2.0_cls_mobile.onnx",
         ".venv/Lib/site-packages/rapidocr/models/PP-OCRv6_rec_small.onnx"
       ]
+    },
+    {
+      "id": "manga-ocr-base",
+      "purpose": "日文漫画专用OCR，支持横排、竖排和多行气泡文本",
+      "status": "optional_not_downloaded",
+      "install_group": "mangaocr",
+      "storage": "D:\\Chatgpt\\01_Projects\\manga-translator-personal\\models\\manga-ocr-base",
+      "automatic_download": false,
+      "estimated_model_size_mb": 400,
+      "note": "另需PyTorch与Transformers，CPU依赖通常还会增加约1GB以上；CUDA版本更大。"
+    },
+    {
+      "id": "lama-onnx",
+      "purpose": "复杂背景与网点区域的本地擦字",
+      "status": "optional_not_downloaded",
+      "install_group": "lama",
+      "storage": "D:\\Chatgpt\\01_Projects\\manga-translator-personal\\models\\lama.onnx",
+      "automatic_download": false,
+      "estimated_model_size_mb": "因ONNX导出版本而异，常见约100-250MB",
+      "note": "缺失、加载失败或推理失败时自动降级到OpenCV擦字。"
     }
   ]
 }

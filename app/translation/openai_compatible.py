@@ -24,7 +24,7 @@ class OpenAICompatibleConfig:
             service_name="DeepSeek",
             api_key=api_key,
             base_url="https://api.deepseek.com/v1",
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
         )
 
 
@@ -48,8 +48,40 @@ class OpenAICompatibleTranslator:
             await self._client.aclose()
 
     async def test_connection(self) -> str:
-        translations = await self.translate(["connection test"], "en", "zh-Hans")
-        return translations[0]
+        available_models = await self.list_models()
+        if self.config.model not in available_models:
+            available = "、".join(available_models[:8]) or "未返回可用模型"
+            raise TranslationServiceError(
+                f"模型不存在或当前账号不可用：{self.config.model}；可用模型：{available}"
+            )
+        return self.config.model
+
+    async def list_models(self) -> list[str]:
+        url = f"{self.config.base_url.rstrip('/')}/models"
+        timeout_seconds = min(max(float(self.config.timeout_seconds), 5.0), 15.0)
+        try:
+            response = await self._client.get(
+                url,
+                headers={"Authorization": f"Bearer {self.config.api_key}"},
+                timeout=httpx.Timeout(timeout_seconds, connect=min(5.0, timeout_seconds)),
+            )
+        except httpx.TimeoutException as error:
+            raise TranslationServiceError(
+                f"连通性测试超时（最多{timeout_seconds:g}秒），请检查网络、代理和Base URL"
+            ) from error
+        except httpx.NetworkError as error:
+            raise TranslationServiceError("无法连接翻译服务，请检查网络、代理和Base URL") from error
+        if not response.is_success:
+            self._raise_for_status(response)
+        try:
+            available_models = {
+                str(item["id"])
+                for item in response.json()["data"]
+                if isinstance(item, dict) and item.get("id")
+            }
+        except (KeyError, TypeError, json.JSONDecodeError) as error:
+            raise TranslationServiceError("服务已连接，但模型列表格式无法识别") from error
+        return sorted(available_models)
 
     async def translate(
         self,

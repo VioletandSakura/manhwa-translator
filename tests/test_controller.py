@@ -32,6 +32,9 @@ class FakeApplication:
     async def test_api_connection(self):
         return "连接成功"
 
+    async def list_api_channel_models(self, _channel_id):
+        return ["deepseek-v4-flash", "deepseek-v4-pro"]
+
     async def process_page(self, source_path, output_dir, options, *, on_progress=None):
         on_progress("保存", 100)
         translated = Path(output_dir) / "translated.png"
@@ -105,3 +108,31 @@ def test_controller_shows_redacted_failure(qtbot, monkeypatch) -> None:
     assert shown == ["请求失败"]
     assert window.stage_label.text() == "当前阶段：失败"
 
+
+def test_api_connection_worker_restores_button_and_status(qtbot) -> None:
+    application = FakeApplication()
+    window = MainWindow(AppPaths.default())
+    qtbot.addWidget(window)
+    controller = MainController(application, window)
+
+    controller.test_api()
+
+    qtbot.waitUntil(lambda: "连接成功" in window.api_status.text(), timeout=3000)
+    assert window.api_test_button.isEnabled()
+    assert window.api_test_button.text() == "测试连通性"
+
+
+def test_controller_fetches_models_into_editable_selector(qtbot) -> None:
+    application = FakeApplication()
+    window = MainWindow(AppPaths.default())
+    qtbot.addWidget(window)
+    controller = MainController(application, window)
+
+    controller.fetch_api_models()
+
+    qtbot.waitUntil(lambda: window.api_model.count() == 2, timeout=3000)
+    assert window.api_model.isEditable()
+    assert window.api_model.itemText(0) == "deepseek-v4-flash"
+    assert window.api_model.itemText(1) == "deepseek-v4-pro"
+    assert window.api_models_button.isEnabled()
+    assert "获取到2个模型" in window.api_status.text()

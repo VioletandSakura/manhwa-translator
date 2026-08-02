@@ -27,6 +27,8 @@ class PageRecord:
     stage: str
     progress: int
     error: str | None
+    attempt_count: int = 0
+    result_path: str | None = None
 
 
 @dataclass(slots=True)
@@ -55,3 +57,29 @@ class PageArtifacts:
     translated: Path
     metadata: Path
 
+
+@dataclass(frozen=True, slots=True)
+class ApiChannelRecord:
+    id: str
+    service_name: str
+    enabled: bool
+    base_url: str
+    model: str
+    timeout_seconds: int
+    max_concurrency: int
+    rpm_limit: int
+    retries: int
+    priority: int
+    strategy: str
+    verified: bool
+    last_error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class LibraryEntry:
+    id: str
+    category: str
+    name: str
+    payload: str
+    enabled: bool
+    sort_order: int

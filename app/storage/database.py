@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.domain.enums import PageStatus, TaskStatus
-from app.domain.models import PageRecord, TaskRecord
+from app.domain.models import ApiChannelRecord, LibraryEntry, PageRecord, TaskRecord
 
 
 def _now() -> str:
@@ -48,6 +48,8 @@ class Database:
                     stage TEXT NOT NULL DEFAULT '',
                     progress INTEGER NOT NULL DEFAULT 0 CHECK(progress BETWEEN 0 AND 100),
                     error TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    result_path TEXT,
                     UNIQUE(task_id, page_index)
                 );
                 CREATE TABLE IF NOT EXISTS settings (
@@ -60,8 +62,126 @@ class Database:
                     translated_text TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS api_channels (
+                    id TEXT PRIMARY KEY,
+                    service_name TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    base_url TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    timeout_seconds INTEGER NOT NULL DEFAULT 60,
+                    max_concurrency INTEGER NOT NULL DEFAULT 1,
+                    rpm_limit INTEGER NOT NULL DEFAULT 60,
+                    retries INTEGER NOT NULL DEFAULT 2,
+                    priority INTEGER NOT NULL DEFAULT 100,
+                    strategy TEXT NOT NULL DEFAULT 'priority',
+                    verified INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS library_entries (
+                    id TEXT PRIMARY KEY,
+                    category TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    sort_order INTEGER NOT NULL DEFAULT 100,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(category, name)
+                );
                 """
             )
+            self._ensure_column(connection, "pages", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "pages", "result_path", "TEXT")
+            connection.commit()
+
+    @staticmethod
+    def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def upsert_api_channel(self, channel: ApiChannelRecord) -> None:
+        with closing(self.connect()) as connection:
+            connection.execute(
+                """INSERT INTO api_channels(
+                    id, service_name, enabled, base_url, model, timeout_seconds,
+                    max_concurrency, rpm_limit, retries, priority, strategy,
+                    verified, last_error, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    service_name=excluded.service_name, enabled=excluded.enabled,
+                    base_url=excluded.base_url, model=excluded.model,
+                    timeout_seconds=excluded.timeout_seconds,
+                    max_concurrency=excluded.max_concurrency, rpm_limit=excluded.rpm_limit,
+                    retries=excluded.retries, priority=excluded.priority,
+                    strategy=excluded.strategy, verified=excluded.verified,
+                    last_error=excluded.last_error, updated_at=excluded.updated_at""",
+                (
+                    channel.id, channel.service_name, int(channel.enabled), channel.base_url,
+                    channel.model, channel.timeout_seconds, channel.max_concurrency,
+                    channel.rpm_limit, channel.retries, channel.priority, channel.strategy,
+                    int(channel.verified), channel.last_error, _now(),
+                ),
+            )
+            connection.commit()
+
+    def list_api_channels(self, *, enabled_only: bool = False) -> list[ApiChannelRecord]:
+        where = "WHERE enabled = 1" if enabled_only else ""
+        with closing(self.connect()) as connection:
+            rows = connection.execute(f"SELECT * FROM api_channels {where} ORDER BY priority, service_name, id").fetchall()
+        return [self._to_api_channel(row) for row in rows]
+
+    def get_api_channel(self, channel_id: str) -> ApiChannelRecord:
+        with closing(self.connect()) as connection:
+            row = connection.execute("SELECT * FROM api_channels WHERE id = ?", (channel_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"API通道不存在：{channel_id}")
+        return self._to_api_channel(row)
+
+    def delete_api_channel(self, channel_id: str) -> None:
+        with closing(self.connect()) as connection:
+            connection.execute("DELETE FROM api_channels WHERE id = ?", (channel_id,))
+            connection.commit()
+
+    def set_api_channel_health(self, channel_id: str, *, verified: bool, last_error: str | None) -> None:
+        with closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE api_channels SET verified = ?, last_error = ?, updated_at = ? WHERE id = ?",
+                (int(verified), last_error, _now(), channel_id),
+            )
+            connection.commit()
+
+    def upsert_library_entry(self, entry: LibraryEntry) -> None:
+        if entry.category not in {"glossary", "prompt", "replacement", "preset"}:
+            raise ValueError(f"不支持的资料类别：{entry.category}")
+        with closing(self.connect()) as connection:
+            connection.execute(
+                """INSERT INTO library_entries(id, category, name, payload, enabled, sort_order, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    category=excluded.category, name=excluded.name, payload=excluded.payload,
+                    enabled=excluded.enabled, sort_order=excluded.sort_order, updated_at=excluded.updated_at""",
+                (entry.id, entry.category, entry.name, entry.payload, int(entry.enabled), entry.sort_order, _now()),
+            )
+            connection.commit()
+
+    def list_library_entries(self, category: str) -> list[LibraryEntry]:
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                "SELECT * FROM library_entries WHERE category = ? ORDER BY sort_order, name, id", (category,)
+            ).fetchall()
+        return [self._to_library_entry(row) for row in rows]
+
+    def get_library_entry(self, entry_id: str) -> LibraryEntry:
+        with closing(self.connect()) as connection:
+            row = connection.execute("SELECT * FROM library_entries WHERE id = ?", (entry_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"资料条目不存在：{entry_id}")
+        return self._to_library_entry(row)
+
+    def delete_library_entry(self, entry_id: str) -> None:
+        with closing(self.connect()) as connection:
+            connection.execute("DELETE FROM library_entries WHERE id = ?", (entry_id,))
             connection.commit()
 
     def create_task(self, source_path: str, output_dir: str) -> str:
@@ -113,6 +233,24 @@ class Database:
             )
             connection.commit()
 
+    def increment_page_attempt(self, page_id: str) -> None:
+        with closing(self.connect()) as connection:
+            connection.execute("UPDATE pages SET attempt_count = attempt_count + 1 WHERE id = ?", (page_id,))
+            connection.commit()
+
+    def reset_page_for_retry(self, page_id: str) -> None:
+        with closing(self.connect()) as connection:
+            connection.execute(
+                "UPDATE pages SET status = ?, stage = '', progress = 0, error = NULL WHERE id = ?",
+                (PageStatus.PENDING.value, page_id),
+            )
+            connection.commit()
+
+    def set_page_result(self, page_id: str, result_path: str | None) -> None:
+        with closing(self.connect()) as connection:
+            connection.execute("UPDATE pages SET result_path = ? WHERE id = ?", (result_path, page_id))
+            connection.commit()
+
     def get_task(self, task_id: str) -> TaskRecord:
         with closing(self.connect()) as connection:
             row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
@@ -127,6 +265,19 @@ class Database:
             updated_at=row["updated_at"],
         )
 
+    def list_tasks(self, limit: int = 200) -> list[TaskRecord]:
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (max(1, limit),)
+            ).fetchall()
+        return [
+            TaskRecord(
+                id=row["id"], source_path=row["source_path"], output_dir=row["output_dir"],
+                status=TaskStatus(row["status"]), created_at=row["created_at"], updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
+
     def get_page(self, page_id: str) -> PageRecord:
         with closing(self.connect()) as connection:
             row = connection.execute("SELECT * FROM pages WHERE id = ?", (page_id,)).fetchone()
@@ -138,8 +289,15 @@ class Database:
         with closing(self.connect()) as connection:
             rows = connection.execute(
                 """SELECT * FROM pages
-                WHERE task_id = ? AND status != ? ORDER BY page_index""",
-                (task_id, PageStatus.COMPLETED.value),
+                WHERE task_id = ? AND status IN (?, ?, ?) ORDER BY page_index""",
+                (task_id, PageStatus.PENDING.value, PageStatus.RUNNING.value, PageStatus.FAILED.value),
+            ).fetchall()
+        return [self._to_page(row) for row in rows]
+
+    def list_task_pages(self, task_id: str) -> list[PageRecord]:
+        with closing(self.connect()) as connection:
+            rows = connection.execute(
+                "SELECT * FROM pages WHERE task_id = ? ORDER BY page_index", (task_id,)
             ).fetchall()
         return [self._to_page(row) for row in rows]
 
@@ -214,5 +372,23 @@ class Database:
             stage=row["stage"],
             progress=row["progress"],
             error=row["error"],
+            attempt_count=row["attempt_count"],
+            result_path=row["result_path"],
         )
 
+    @staticmethod
+    def _to_api_channel(row: sqlite3.Row) -> ApiChannelRecord:
+        return ApiChannelRecord(
+            id=row["id"], service_name=row["service_name"], enabled=bool(row["enabled"]),
+            base_url=row["base_url"], model=row["model"], timeout_seconds=row["timeout_seconds"],
+            max_concurrency=row["max_concurrency"], rpm_limit=row["rpm_limit"],
+            retries=row["retries"], priority=row["priority"], strategy=row["strategy"],
+            verified=bool(row["verified"]), last_error=row["last_error"],
+        )
+
+    @staticmethod
+    def _to_library_entry(row: sqlite3.Row) -> LibraryEntry:
+        return LibraryEntry(
+            id=row["id"], category=row["category"], name=row["name"], payload=row["payload"],
+            enabled=bool(row["enabled"]), sort_order=row["sort_order"],
+        )
