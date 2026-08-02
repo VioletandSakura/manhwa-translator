@@ -73,3 +73,22 @@ def test_editor_can_save_local_mask(tmp_path: Path, qtbot) -> None:
 
     assert mask_path.is_file()
     assert Image.open(mask_path).getbbox() is not None
+
+
+def test_editor_highlights_review_region_and_shows_chinese_reason(tmp_path: Path, qtbot) -> None:
+    image, metadata = _page_files(tmp_path)
+    document = json.loads(metadata.read_text(encoding="utf-8"))
+    document["regions"][0]["needs_review"] = True
+    document["regions"][0]["metadata"] = {
+        "auto_processing_excluded_reason": "isolated_ascii_alphanumeric"
+    }
+    metadata.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+    editor = PageEditorWidget()
+    qtbot.addWidget(editor)
+
+    editor.load_page(image, metadata)
+    editor.select_region("r1")
+
+    assert editor._items["r1"].pen().color().name() == "#dc2626"
+    assert "待人工检查" in editor.review_status.text()
+    assert "孤立的半角字母或数字" in editor.review_status.text()

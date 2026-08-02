@@ -40,8 +40,12 @@ class RegionItem(QGraphicsRectItem):
             | QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable
             | QGraphicsRectItem.GraphicsItemFlag.ItemIsFocusable
         )
-        self.setPen(QPen(QColor("#1570ef"), 2, Qt.PenStyle.DashLine))
-        self.setBrush(QColor(21, 112, 239, 24))
+        if region.needs_review:
+            self.setPen(QPen(QColor("#dc2626"), 3, Qt.PenStyle.DashLine))
+            self.setBrush(QColor(220, 38, 38, 34))
+        else:
+            self.setPen(QPen(QColor("#1570ef"), 2, Qt.PenStyle.DashLine))
+            self.setBrush(QColor(21, 112, 239, 24))
 
 
 class MaskGraphicsView(QGraphicsView):
@@ -120,6 +124,9 @@ class PageEditorWidget(QWidget):
         panel = QWidget()
         panel.setMaximumWidth(340)
         side = QVBoxLayout(panel)
+        self.review_status = QLabel("状态：未选择文字框")
+        self.review_status.setWordWrap(True)
+        side.addWidget(self.review_status)
         side.addWidget(QLabel("文本框属性"))
         form = QFormLayout()
         self.source_text = QLineEdit()
@@ -381,6 +388,7 @@ class PageEditorWidget(QWidget):
         region, item = self._regions[region_id], self._items[region_id]
         self._updating_controls = True
         try:
+            self._show_review_status(region)
             self.source_text.setText(region.source_text)
             self.translation_text.setText(region.translated_text)
             self.x_value.setValue(round(item.x()))
@@ -396,6 +404,20 @@ class PageEditorWidget(QWidget):
             self.alignment.setCurrentIndex(max(0, self.alignment.findData(region.metadata.get("alignment", "center"))))
         finally:
             self._updating_controls = False
+
+    def _show_review_status(self, region: TextRegion) -> None:
+        if not region.needs_review:
+            self.review_status.setText("状态：可自动处理")
+            self.review_status.setStyleSheet("color:#1570ef")
+            return
+        reason = str(region.metadata.get("auto_processing_excluded_reason", ""))
+        reason_labels = {
+            "isolated_ascii_alphanumeric": "孤立的半角字母或数字",
+            "punctuation_or_symbol_only": "仅包含标点或符号",
+        }
+        detail = reason_labels.get(reason, "OCR 置信度较低或需要人工确认")
+        self.review_status.setText(f"待人工检查：{detail}；自动翻译、擦字和渲染已跳过")
+        self.review_status.setStyleSheet("color:#b42318;font-weight:600")
 
     def _sync_region(self, region_id: str) -> None:
         region, item = self._regions[region_id], self._items[region_id]
