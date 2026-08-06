@@ -121,7 +121,7 @@ def test_rapidocr_refines_low_confidence_cached_region() -> None:
     assert regions[0].source_text == "\u5165\u3063\u3066"
     assert regions[0].confidence == pytest.approx(0.82)
     assert regions[0].metadata.get("ocr_refined") is True
-    assert engine.calls >= 1
+    assert engine.calls == 6
 
 
 def test_rapidocr_keeps_high_confidence_cached_region_untouched() -> None:
@@ -146,3 +146,35 @@ def test_rapidocr_rejects_unrelated_refinement_reading() -> None:
 
     assert regions[0].source_text == "LMEIS"
     assert "ocr_refined" not in regions[0].metadata
+
+
+def test_rapidocr_engine_applies_detection_config_to_real_engine() -> None:
+    engine_obj = SimpleNamespace(
+        max_side_len=2000,
+        text_det=SimpleNamespace(limit_side_len=736),
+    )
+    ocr = RapidOCREngine(engine_obj, det_limit_side_len=1280, max_side_len=4000)
+
+    ocr._get_engine()
+
+    assert engine_obj.max_side_len == 4000
+    assert engine_obj.text_det.limit_side_len == 1280
+
+
+def test_rapidocr_engine_switches_detection_config_on_shared_instance() -> None:
+    engine_obj = SimpleNamespace(
+        max_side_len=2000,
+        text_det=SimpleNamespace(limit_side_len=736),
+    )
+    ocr = RapidOCREngine(engine_obj)
+    ocr._get_engine()
+
+    ocr.set_detection_config(det_limit_side_len=1280, max_side_len=4000)
+
+    assert engine_obj.max_side_len == 4000
+    assert engine_obj.text_det.limit_side_len == 1280
+
+    ocr.set_detection_config(det_limit_side_len=None, max_side_len=None)
+
+    assert engine_obj.max_side_len == 4000
+    assert engine_obj.text_det.limit_side_len == 1280

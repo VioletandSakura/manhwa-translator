@@ -74,3 +74,14 @@ def test_api_model_selector_accepts_fetched_choices_and_custom_text(qtbot) -> No
         "deepseek-v4-pro",
     ]
     assert window.api_model.currentText() == "custom-model"
+
+
+def test_high_accuracy_ocr_checkbox_applies_from_preset(qtbot) -> None:
+    window = MainWindow(AppPaths.default())
+    qtbot.addWidget(window)
+
+    assert not window.high_accuracy_ocr.isChecked()
+
+    window.apply_preset_values({"high_accuracy_ocr": True})
+
+    assert window.high_accuracy_ocr.isChecked()

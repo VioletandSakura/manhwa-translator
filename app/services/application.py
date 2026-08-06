@@ -309,9 +309,10 @@ class TranslationApplication:
         translate: bool = True,
         ocr_engine: str = "rapidocr",
         inpainting_engine: str = "opencv",
+        high_accuracy_ocr: bool = False,
     ) -> PagePipeline:
         translator = self.build_translator() if translate else _UnusedTranslator()
-        detector_ocr = self._get_rapidocr_engine()
+        detector_ocr = self._get_rapidocr_engine(high_accuracy_ocr=high_accuracy_ocr)
         ocr = (
             MangaOCREngine(self.paths.models_dir / "manga-ocr-base")
             if ocr_engine == "mangaocr"
@@ -334,9 +335,19 @@ class TranslationApplication:
             renderer=PillowTextRenderer(),
         )
 
-    def _get_rapidocr_engine(self) -> RapidOCREngine:
+    def _get_rapidocr_engine(self, *, high_accuracy_ocr: bool = False) -> RapidOCREngine:
+        det_limit_side_len = 1280 if high_accuracy_ocr else None
+        max_side_len = 4000 if high_accuracy_ocr else None
         if self._rapidocr_engine is None:
-            self._rapidocr_engine = RapidOCREngine()
+            self._rapidocr_engine = RapidOCREngine(
+                det_limit_side_len=det_limit_side_len,
+                max_side_len=max_side_len,
+            )
+        else:
+            self._rapidocr_engine.set_detection_config(
+                det_limit_side_len=det_limit_side_len,
+                max_side_len=max_side_len,
+            )
         return self._rapidocr_engine
 
     def build_task_queue(
@@ -345,6 +356,7 @@ class TranslationApplication:
         *,
         ocr_engine: str = "rapidocr",
         inpainting_engine: str = "opencv",
+        high_accuracy_ocr: bool = False,
         on_page_completed=None,
         on_page_failed=None,
         on_page_progress=None,
@@ -353,6 +365,7 @@ class TranslationApplication:
             translate=options.translate,
             ocr_engine=ocr_engine,
             inpainting_engine=inpainting_engine,
+            high_accuracy_ocr=high_accuracy_ocr,
         )
 
         async def process(page, output_dir, on_progress):

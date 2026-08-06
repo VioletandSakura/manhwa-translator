@@ -18,20 +18,49 @@ class RapidOCRUnavailableError(RuntimeError):
 class RapidOCREngine:
     """延迟加载RapidOCR，避免程序启动时下载或载入模型。"""
 
-    def __init__(self, engine: Any | None = None, *, refine_threshold: float = 0.65) -> None:
+    def __init__(
+        self,
+        engine: Any | None = None,
+        *,
+        refine_threshold: float = 0.65,
+        det_limit_side_len: int | None = None,
+        max_side_len: int | None = None,
+    ) -> None:
         self._engine = engine
         self._inference_lock = threading.Lock()
         self.refine_threshold = refine_threshold
+        self.det_limit_side_len = det_limit_side_len
+        self.max_side_len = max_side_len
 
     def _get_engine(self) -> Any:
         if self._engine is not None:
+            self._apply_detection_config()
             return self._engine
         try:
             from rapidocr import RapidOCR
         except ImportError as error:
             raise RapidOCRUnavailableError("尚未安装本地OCR组件。请在OCR设置中确认安装后再试。") from error
         self._engine = RapidOCR()
+        self._apply_detection_config()
         return self._engine
+
+    def set_detection_config(
+        self,
+        *,
+        det_limit_side_len: int | None = None,
+        max_side_len: int | None = None,
+    ) -> None:
+        self.det_limit_side_len = det_limit_side_len
+        self.max_side_len = max_side_len
+        self._apply_detection_config()
+
+    def _apply_detection_config(self) -> None:
+        if self._engine is None:
+            return
+        if self.max_side_len is not None:
+            self._engine.max_side_len = self.max_side_len
+        if self.det_limit_side_len is not None and hasattr(self._engine, "text_det"):
+            self._engine.text_det.limit_side_len = self.det_limit_side_len
 
     async def recognize(self, image: np.ndarray, regions: list[TextRegion]) -> list[TextRegion]:
         height, width = image.shape[:2]
@@ -78,10 +107,16 @@ class RapidOCREngine:
         with self._inference_lock:
             for region in regions:
                 crop = self._rotate_crop(image, region.polygon)
-                if crop is None or crop.size == 0:
-                    continue
+                padded = self._rotate_crop(
+                    image, self._expand_polygon(region.polygon, 1.1)
+                )
+                variants: list[np.ndarray] = []
+                for base in (crop, padded):
+                    if base is None or base.size == 0:
+                        continue
+                    variants.extend(self._refine_variants(base))
                 best = None
-                for variant in self._refine_variants(crop):
+                for variant in variants:
                     result = self._recognize_variant(engine, variant)
                     if result and result["text"] and (best is None or result["conf"] > best["conf"]):
                         best = result
@@ -127,6 +162,13 @@ class RapidOCREngine:
             return False
         similarity = SequenceMatcher(None, old_text, text).ratio()
         return similarity >= 0.5
+
+    @staticmethod
+    def _expand_polygon(points: list[tuple[int, int]], ratio: float) -> list[tuple[int, int]]:
+        polygon = np.asarray(points, dtype=np.float32)
+        center = polygon.mean(axis=0)
+        expanded = (polygon - center) * ratio + center
+        return [(int(round(x)), int(round(y))) for x, y in expanded.tolist()]
 
     @staticmethod
     def _rotate_crop(image: np.ndarray, points: list[tuple[int, int]]) -> np.ndarray | None:

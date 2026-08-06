@@ -99,3 +99,20 @@ def test_application_exports_completed_pages_to_zip_with_original_names(tmp_path
     with zipfile.ZipFile(target) as archive:
         assert archive.namelist() == ["001.png"]
         assert archive.read("001.png") == b"translated"
+
+
+def test_high_accuracy_ocr_reconfigures_shared_rapidocr_engine(tmp_path: Path) -> None:
+    application = _application(tmp_path)
+
+    normal = application.build_pipeline(translate=False, ocr_engine="rapidocr")
+
+    assert normal.detector.ocr.det_limit_side_len is None
+    assert normal.detector.ocr.max_side_len is None
+
+    high = application.build_pipeline(
+        translate=False, ocr_engine="rapidocr", high_accuracy_ocr=True
+    )
+
+    assert high.detector.ocr is normal.detector.ocr
+    assert high.detector.ocr.det_limit_side_len == 1280
+    assert high.detector.ocr.max_side_len == 4000
