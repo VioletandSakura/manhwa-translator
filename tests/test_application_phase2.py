@@ -128,3 +128,13 @@ def test_build_task_queue_exposes_max_concurrent_pages(tmp_path: Path) -> None:
     )
 
     assert queue.max_concurrent_pages == 2
+
+
+def test_build_task_queue_archives_originals_by_default(tmp_path: Path) -> None:
+    from app.tasks.pipeline import PipelineOptions
+
+    application = _application(tmp_path)
+
+    queue = application.build_task_queue(PipelineOptions(translate=False))
+
+    assert queue.on_task_completed == application.archive_originals

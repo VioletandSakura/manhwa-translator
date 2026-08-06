@@ -16,6 +16,7 @@ PageProgress = Callable[[str, int], None]
 PageProcessor = Callable[[PageRecord, Path, PageProgress], Awaitable[Any]]
 QueueEventCallback = Callable[[str, PageRecord], None]
 QueueProgressCallback = Callable[[str, PageRecord, str, int], None]
+QueueTaskCallback = Callable[[str], None]
 
 
 class PersistentTaskQueue:
@@ -25,6 +26,7 @@ class PersistentTaskQueue:
         processor: PageProcessor,
         *,
         max_concurrent_pages: int = 1,
+        on_task_completed: QueueTaskCallback | None = None,
         on_page_completed: QueueEventCallback | None = None,
         on_page_failed: QueueEventCallback | None = None,
         on_page_progress: QueueProgressCallback | None = None,
@@ -32,6 +34,7 @@ class PersistentTaskQueue:
         self.database = database
         self.processor = processor
         self.max_concurrent_pages = max(1, max_concurrent_pages)
+        self.on_task_completed = on_task_completed
         self.on_page_completed = on_page_completed
         self.on_page_failed = on_page_failed
         self.on_page_progress = on_page_progress
@@ -79,6 +82,8 @@ class PersistentTaskQueue:
 
         await asyncio.gather(*(process_page(page) for page in pages))
         self._finish_task(task_id)
+        if self.on_task_completed is not None:
+            self.on_task_completed(task_id)
         self.database.close()
 
     async def _process_page(

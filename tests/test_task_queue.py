@@ -138,3 +138,20 @@ def test_queue_default_remains_sequential(tmp_path: Path) -> None:
 
     assert max_active == 1
     assert database.get_task(task_id).status is TaskStatus.COMPLETED
+
+
+def test_queue_invokes_task_completed_callback(tmp_path: Path) -> None:
+    database = Database(tmp_path / "app.db")
+    database.initialize()
+    task_id, _ = _task_with_pages(database, 1)
+    calls: list[str] = []
+
+    queue = PersistentTaskQueue(
+        database,
+        lambda *_args: None,
+        on_task_completed=calls.append,
+    )
+
+    asyncio.run(queue.run(task_id))
+
+    assert calls == [task_id]

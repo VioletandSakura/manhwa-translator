@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable, Coroutine
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
-from PySide6.QtWidgets import QFileDialog
+from PySide6.QtWidgets import QApplication, QFileDialog
 
 from app.security.redaction import redact_text
 from app.services.application import ProcessingOutcome, TranslationApplication
@@ -72,6 +72,7 @@ class MainController(QObject):
         window.pause_requested.connect(self.pause_batch)
         window.resume_requested.connect(self.resume_batch)
         window.cancel_requested.connect(self.cancel_batch)
+        window.exit_requested.connect(self.quit_application)
         self.page_preview_ready.connect(lambda path: self.window.set_result_preview(Path(path)))
         self.page_status_ready.connect(self.window.update_queue_page)
         self.page_progress_ready.connect(self._show_batch_progress)
@@ -416,6 +417,10 @@ class MainController(QObject):
         if self._active_queue is not None and self._active_task_id is not None:
             self._active_queue.cancel(self._active_task_id)
             self.window.set_progress("正在取消", self.window.progress_bar.value())
+
+    @Slot()
+    def quit_application(self) -> None:
+        QApplication.instance().quit()
 
     @Slot()
     def retry_failed_page(self) -> None:

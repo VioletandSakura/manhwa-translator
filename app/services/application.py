@@ -222,6 +222,48 @@ class TranslationApplication:
                 archive.write(page.result_path, arcname=name)
         return target_path
 
+    def archive_originals(self, task_id: str) -> Path | None:
+        """Pack the original/ folder into originals.zip and remove loose copies.
+
+        Only runs for completed tasks and only after the zip is written and
+        verified, so originals are never lost if archiving fails.
+        """
+        try:
+            task = self.database.get_task(task_id)
+            if task.status is not TaskStatus.COMPLETED:
+                return None
+            output_dir = Path(task.output_dir)
+            original_dir = output_dir / "original"
+            archive_path = output_dir / "originals.zip"
+            if archive_path.exists():
+                return archive_path
+            if not original_dir.is_dir():
+                return None
+            files = sorted(
+                (path for path in original_dir.iterdir() if path.is_file()),
+                key=lambda path: path.name,
+            )
+            if not files:
+                return None
+            with zipfile.ZipFile(
+                archive_path, "w", compression=zipfile.ZIP_DEFLATED
+            ) as archive:
+                for path in files:
+                    archive.write(path, arcname=path.name)
+            if not archive_path.is_file() or archive_path.stat().st_size <= 0:
+                raise RuntimeError("原图压缩包写入失败")
+            for path in files:
+                path.unlink()
+            try:
+                original_dir.rmdir()
+            except OSError:
+                pass
+            self.logger.info(f"原图已归档：{archive_path.name}")
+            return archive_path
+        except Exception as error:
+            self.logger.warning(f"原图归档失败：{redact_text(str(error))}")
+            return None
+
     async def rerender_metadata(self, metadata_path: Path) -> Path:
         metadata_path = Path(metadata_path)
         document = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -358,6 +400,7 @@ class TranslationApplication:
         inpainting_engine: str = "opencv",
         high_accuracy_ocr: bool = False,
         max_concurrent_pages: int = 1,
+        on_task_completed=None,
         on_page_completed=None,
         on_page_failed=None,
         on_page_progress=None,
@@ -378,6 +421,11 @@ class TranslationApplication:
             self.database,
             process,
             max_concurrent_pages=max_concurrent_pages,
+            on_task_completed=(
+                on_task_completed
+                if on_task_completed is not None
+                else self.archive_originals
+            ),
             on_page_completed=on_page_completed,
             on_page_failed=on_page_failed,
             on_page_progress=on_page_progress,
@@ -468,6 +516,7 @@ class TranslationApplication:
             raise
         self.database.update_page_status(page_id, PageStatus.COMPLETED, stage="保存", progress=100)
         self.database.update_task_status(task_id, TaskStatus.COMPLETED)
+        self.archive_originals(task_id)
         self.logger.info(f"页面处理完成：{Path(source_path).name}")
         return ProcessingOutcome(task_id=task_id, page_id=page_id, result=result)
 

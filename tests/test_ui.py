@@ -97,3 +97,36 @@ def test_concurrent_pages_spinbox_defaults_and_applies_preset(qtbot) -> None:
     window.apply_preset_values({"concurrent_pages": 2})
 
     assert window.concurrent_pages.value() == 2
+
+
+def test_main_window_close_hides_to_tray(qtbot, monkeypatch) -> None:
+    from PySide6.QtWidgets import QSystemTrayIcon
+
+    monkeypatch.setattr(
+        QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
+    )
+    window = MainWindow(AppPaths.default())
+    qtbot.addWidget(window)
+    window.show()
+
+    window.close()
+
+    assert not window.isVisible()
+    window.show_from_tray()
+    assert window.isVisible()
+
+
+def test_tray_exit_action_requests_quit(qtbot) -> None:
+    window = MainWindow(AppPaths.default())
+    qtbot.addWidget(window)
+    exited: list[bool] = []
+    window.exit_requested.connect(lambda: exited.append(True))
+
+    exit_action = next(
+        action
+        for action in window.tray_icon.contextMenu().actions()
+        if action.text() == "退出"
+    )
+    exit_action.trigger()
+
+    assert exited == [True]

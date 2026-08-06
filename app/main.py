@@ -14,6 +14,7 @@ def create_application() -> tuple[QApplication, MainWindow, MainController]:
     qt_application = QApplication.instance() or QApplication(sys.argv)
     qt_application.setApplicationName("个人漫画翻译器")
     qt_application.setOrganizationName("Personal")
+    qt_application.setQuitOnLastWindowClosed(False)
     paths = AppPaths.default()
     application = TranslationApplication(paths)
     application.initialize()

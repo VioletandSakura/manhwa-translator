@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QColor, QCloseEvent, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -15,11 +15,13 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSpinBox,
+    QSystemTrayIcon,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -51,6 +53,7 @@ class MainWindow(QMainWindow):
     pause_requested = Signal()
     resume_requested = Signal()
     cancel_requested = Signal()
+    exit_requested = Signal()
 
     def __init__(self, paths: AppPaths) -> None:
         super().__init__()
@@ -75,6 +78,67 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.page_editor, "可视化编辑器")
         self._apply_style()
         self.set_busy(False)
+        self._allow_quit = False
+        self._tray_hint_shown = False
+        self._setup_tray()
+
+    def _setup_tray(self) -> None:
+        self.tray_icon = QSystemTrayIcon(self._app_icon(), self)
+        menu = QMenu()
+        show_action = menu.addAction("显示主窗口")
+        show_action.triggered.connect(self.show_from_tray)
+        exit_action = menu.addAction("退出")
+        exit_action.triggered.connect(self.request_quit)
+        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.activated.connect(self._tray_activated)
+
+    def show_from_tray(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def request_quit(self) -> None:
+        self._allow_quit = True
+        self.tray_icon.hide()
+        self.exit_requested.emit()
+
+    def _tray_activated(self, reason) -> None:
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.show_from_tray()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self._allow_quit or not QSystemTrayIcon.isSystemTrayAvailable():
+            event.accept()
+            return
+        event.ignore()
+        self.hide()
+        self.tray_icon.show()
+        if not self._tray_hint_shown:
+            self._tray_hint_shown = True
+            self.tray_icon.showMessage(
+                "个人漫画翻译器",
+                "窗口已隐藏，任务仍在后台运行；点击托盘图标可恢复，右键可退出。",
+                QSystemTrayIcon.MessageIcon.Information,
+                3000,
+            )
+
+    @staticmethod
+    def _app_icon() -> QIcon:
+        pixmap = QPixmap(64, 64)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#1570ef"))
+        painter.drawRoundedRect(0, 0, 64, 64, 14, 14)
+        font = QFont()
+        font.setPixelSize(40)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor("white"))
+        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "翻")
+        painter.end()
+        return QIcon(pixmap)
 
     def _build_translation_tab(self) -> QWidget:
         page = QWidget()

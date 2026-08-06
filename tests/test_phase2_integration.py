@@ -57,7 +57,8 @@ def test_controller_processes_folder_as_persistent_offline_batch(tmp_path: Path,
     task = application.database.get_task(task_id)
     assert Path(task.output_dir) == tmp_path / "out" / "测试漫画"
     batch_output = tmp_path / "out" / "测试漫画"
-    assert len(list((batch_output / "original").glob("*.png"))) == 2
+    assert (batch_output / "originals.zip").is_file()
+    assert not (batch_output / "original").exists()
     assert len(list((batch_output / "inpainted").glob("*.png"))) == 2
     assert len(list((batch_output / "translated").glob("*.png"))) == 2
     assert len(list((batch_output / "metadata").glob("*.json"))) == 2
