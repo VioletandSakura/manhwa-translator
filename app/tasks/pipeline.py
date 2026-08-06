@@ -119,6 +119,12 @@ class PagePipeline:
         normalized = text.strip()
         if len(normalized) == 1 and normalized.isascii() and normalized.isalnum():
             return "isolated_ascii_alphanumeric"
+        if (
+            normalized.isascii()
+            and 2 <= len(normalized) <= 4
+            and any(character.isalnum() for character in normalized)
+        ):
+            return "sound_effect_like"
         if normalized and not any(
             unicodedata.category(character)[0] in {"L", "N"}
             for character in normalized

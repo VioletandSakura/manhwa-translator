@@ -130,6 +130,16 @@ class MainWindow(QMainWindow):
         language_row.addStretch(1)
         layout.addLayout(language_row)
 
+        speed_row = QHBoxLayout()
+        self.concurrent_pages = QSpinBox()
+        self.concurrent_pages.setRange(1, 4)
+        self.concurrent_pages.setValue(1)
+        speed_row.addWidget(QLabel("并行页数"))
+        speed_row.addWidget(self.concurrent_pages)
+        speed_row.addWidget(QLabel("（>1 时翻译可重叠，OCR仍串行）"))
+        speed_row.addStretch(1)
+        layout.addLayout(speed_row)
+
         self.queue_table = QTableWidget(0, 4)
         self.queue_table.setHorizontalHeaderLabels(["页码", "文件", "状态", "错误"])
         self.queue_table.setMaximumHeight(150)
@@ -492,6 +502,8 @@ class MainWindow(QMainWindow):
         high_accuracy = payload.get("high_accuracy_ocr")
         if isinstance(high_accuracy, bool):
             self.high_accuracy_ocr.setChecked(high_accuracy)
+        if "concurrent_pages" in payload:
+            self.concurrent_pages.setValue(int(payload["concurrent_pages"]))
         self._select_combo_data(self.inpainting_engine, payload.get("inpainting_engine"))
         self._select_combo_data(self.source_language, payload.get("source_language"))
         self._select_combo_data(self.target_language, payload.get("target_language"))

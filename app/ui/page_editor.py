@@ -413,6 +413,7 @@ class PageEditorWidget(QWidget):
         reason = str(region.metadata.get("auto_processing_excluded_reason", ""))
         reason_labels = {
             "isolated_ascii_alphanumeric": "孤立的半角字母或数字",
+            "sound_effect_like": "疑似效果字/短英文数字",
             "punctuation_or_symbol_only": "仅包含标点或符号",
         }
         detail = reason_labels.get(reason, "OCR 置信度较低或需要人工确认")

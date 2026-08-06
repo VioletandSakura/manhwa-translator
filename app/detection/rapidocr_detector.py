@@ -9,6 +9,8 @@ import numpy as np
 from app.domain.models import TextRegion
 from app.ocr.rapidocr_engine import RapidOCREngine
 
+from .region_merger import merge_text_regions
+
 
 class RapidOCRDetector:
     """使用PP-OCR检测框，并缓存同次推理得到的识别文本。"""
@@ -47,7 +49,7 @@ class RapidOCRDetector:
                     },
                 )
             )
-        return regions
+        return merge_text_regions(regions)
 
     @staticmethod
     def _as_list(value) -> list:

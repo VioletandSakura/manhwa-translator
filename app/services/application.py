@@ -357,6 +357,7 @@ class TranslationApplication:
         ocr_engine: str = "rapidocr",
         inpainting_engine: str = "opencv",
         high_accuracy_ocr: bool = False,
+        max_concurrent_pages: int = 1,
         on_page_completed=None,
         on_page_failed=None,
         on_page_progress=None,
@@ -376,6 +377,7 @@ class TranslationApplication:
         return PersistentTaskQueue(
             self.database,
             process,
+            max_concurrent_pages=max_concurrent_pages,
             on_page_completed=on_page_completed,
             on_page_failed=on_page_failed,
             on_page_progress=on_page_progress,

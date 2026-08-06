@@ -116,3 +116,15 @@ def test_high_accuracy_ocr_reconfigures_shared_rapidocr_engine(tmp_path: Path) -
     assert high.detector.ocr is normal.detector.ocr
     assert high.detector.ocr.det_limit_side_len == 1280
     assert high.detector.ocr.max_side_len == 4000
+
+
+def test_build_task_queue_exposes_max_concurrent_pages(tmp_path: Path) -> None:
+    from app.tasks.pipeline import PipelineOptions
+
+    application = _application(tmp_path)
+
+    queue = application.build_task_queue(
+        PipelineOptions(translate=False), max_concurrent_pages=2
+    )
+
+    assert queue.max_concurrent_pages == 2

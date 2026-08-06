@@ -85,3 +85,15 @@ def test_high_accuracy_ocr_checkbox_applies_from_preset(qtbot) -> None:
     window.apply_preset_values({"high_accuracy_ocr": True})
 
     assert window.high_accuracy_ocr.isChecked()
+
+
+def test_concurrent_pages_spinbox_defaults_and_applies_preset(qtbot) -> None:
+    window = MainWindow(AppPaths.default())
+    qtbot.addWidget(window)
+
+    assert window.concurrent_pages.value() == 1
+
+    window.concurrent_pages.setValue(3)
+    window.apply_preset_values({"concurrent_pages": 2})
+
+    assert window.concurrent_pages.value() == 2

@@ -228,3 +228,13 @@ def test_renderer_caches_fonts_by_size(tmp_path: Path, monkeypatch) -> None:
     assert first is second
     assert third is not first
     assert calls == [(str(font_path), 18), (str(font_path), 24)]
+
+
+def test_review_exclusion_marks_short_ascii_as_sound_effect_like() -> None:
+    assert PagePipeline._review_exclusion_reason("EF") == "sound_effect_like"
+    assert PagePipeline._review_exclusion_reason("8300") == "sound_effect_like"
+    assert PagePipeline._review_exclusion_reason("pi~") == "sound_effect_like"
+    assert PagePipeline._review_exclusion_reason("9=") == "sound_effect_like"
+    assert PagePipeline._review_exclusion_reason("LMEIS") is None
+    assert PagePipeline._review_exclusion_reason("JII+4") is None
+    assert PagePipeline._review_exclusion_reason("\u3042") is None

@@ -178,3 +178,24 @@ def test_rapidocr_engine_switches_detection_config_on_shared_instance() -> None:
 
     assert engine_obj.max_side_len == 4000
     assert engine_obj.text_det.limit_side_len == 1280
+
+
+def test_rapidocr_detector_merges_split_bubble_boxes() -> None:
+    output = SimpleNamespace(
+        boxes=np.asarray(
+            [
+                [[10, 10], [90, 10], [90, 40], [10, 40]],
+                [[10, 50], [90, 50], [90, 80], [10, 80]],
+            ]
+        ),
+        txts=np.asarray(["\u4e00\u884c\u76ee", "\u4e8c\u884c\u76ee"]),
+        scores=np.asarray([0.9, 0.8]),
+    )
+    ocr = RapidOCREngine(lambda image: output)
+    detector = RapidOCRDetector(ocr)
+
+    regions = asyncio.run(detector.detect(np.zeros((100, 120, 3), dtype=np.uint8)))
+
+    assert len(regions) == 1
+    assert regions[0].metadata["ocr_source_text"] == "\u4e00\u884c\u76ee\n\u4e8c\u884c\u76ee"
+    assert regions[0].metadata["ocr_confidence"] == pytest.approx(0.85)

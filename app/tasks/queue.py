@@ -24,12 +24,14 @@ class PersistentTaskQueue:
         database: Database,
         processor: PageProcessor,
         *,
+        max_concurrent_pages: int = 1,
         on_page_completed: QueueEventCallback | None = None,
         on_page_failed: QueueEventCallback | None = None,
         on_page_progress: QueueProgressCallback | None = None,
     ) -> None:
         self.database = database
         self.processor = processor
+        self.max_concurrent_pages = max(1, max_concurrent_pages)
         self.on_page_completed = on_page_completed
         self.on_page_failed = on_page_failed
         self.on_page_progress = on_page_progress
@@ -68,38 +70,53 @@ class PersistentTaskQueue:
         if task_id not in self._paused_tasks:
             event.set()
             self.database.update_task_status(task_id, TaskStatus.RUNNING)
-        for page in self.database.list_resumable_pages(task_id):
-            await asyncio.to_thread(event.wait)
-            if task_id in self._cancelled_tasks:
-                self.database.update_page_status(
-                    page.id, PageStatus.CANCELLED, stage="已取消", progress=page.progress
-                )
-                continue
-            self.database.increment_page_attempt(page.id)
-            self.database.update_page_status(page.id, PageStatus.RUNNING, stage="准备", progress=0)
+        pages = self.database.list_resumable_pages(task_id)
+        semaphore = asyncio.Semaphore(self.max_concurrent_pages)
 
-            def record_progress(stage: str, progress: int, *, page_id: str = page.id) -> None:
-                self.database.update_page_status(page_id, PageStatus.RUNNING, stage=stage, progress=progress)
-                if self.on_page_progress is not None:
-                    self.on_page_progress(task_id, self.database.get_page(page_id), stage, progress)
+        async def process_page(page: PageRecord) -> None:
+            async with semaphore:
+                await self._process_page(task_id, task, page, event)
 
-            try:
-                result = await self.processor(page, Path(task.output_dir), record_progress)
-            except Exception as error:
-                message = redact_text(str(error))
-                self.database.update_page_status(
-                    page.id, PageStatus.FAILED, stage="失败", progress=0, error=message
-                )
-                if self.on_page_failed is not None:
-                    self.on_page_failed(task_id, self.database.get_page(page.id))
-                continue
-            result_path = getattr(getattr(result, "artifacts", None), "translated", None)
-            self.database.set_page_result(page.id, None if result_path is None else str(result_path))
-            self.database.update_page_status(page.id, PageStatus.COMPLETED, stage="保存", progress=100)
-            if self.on_page_completed is not None:
-                self.on_page_completed(task_id, self.database.get_page(page.id))
+        await asyncio.gather(*(process_page(page) for page in pages))
         self._finish_task(task_id)
         self.database.close()
+
+    async def _process_page(
+        self,
+        task_id: str,
+        task,
+        page: PageRecord,
+        event: threading.Event,
+    ) -> None:
+        await asyncio.to_thread(event.wait)
+        if task_id in self._cancelled_tasks:
+            self.database.update_page_status(
+                page.id, PageStatus.CANCELLED, stage="已取消", progress=page.progress
+            )
+            return
+        self.database.increment_page_attempt(page.id)
+        self.database.update_page_status(page.id, PageStatus.RUNNING, stage="准备", progress=0)
+
+        def record_progress(stage: str, progress: int, *, page_id: str = page.id) -> None:
+            self.database.update_page_status(page_id, PageStatus.RUNNING, stage=stage, progress=progress)
+            if self.on_page_progress is not None:
+                self.on_page_progress(task_id, self.database.get_page(page_id), stage, progress)
+
+        try:
+            result = await self.processor(page, Path(task.output_dir), record_progress)
+        except Exception as error:
+            message = redact_text(str(error))
+            self.database.update_page_status(
+                page.id, PageStatus.FAILED, stage="失败", progress=0, error=message
+            )
+            if self.on_page_failed is not None:
+                self.on_page_failed(task_id, self.database.get_page(page.id))
+            return
+        result_path = getattr(getattr(result, "artifacts", None), "translated", None)
+        self.database.set_page_result(page.id, None if result_path is None else str(result_path))
+        self.database.update_page_status(page.id, PageStatus.COMPLETED, stage="保存", progress=100)
+        if self.on_page_completed is not None:
+            self.on_page_completed(task_id, self.database.get_page(page.id))
 
     def _finish_task(self, task_id: str) -> None:
         pages = self.database.list_task_pages(task_id)

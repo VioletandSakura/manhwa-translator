@@ -93,3 +93,48 @@ def test_failed_page_can_be_retried_and_attempt_count_is_persisted(tmp_path: Pat
     page = database.get_page(page_ids[0])
     assert page.status is PageStatus.COMPLETED
     assert page.attempt_count == 2
+
+
+def test_queue_can_process_pages_concurrently_when_configured(tmp_path: Path) -> None:
+    database = Database(tmp_path / "app.db")
+    database.initialize()
+    task_id, page_ids = _task_with_pages(database, 4)
+    active = 0
+    max_active = 0
+
+    async def process(page, _output_dir, on_progress):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.05)
+        active -= 1
+        on_progress("OCR", 30)
+        return f"result-{page.id}"
+
+    queue = PersistentTaskQueue(database, process, max_concurrent_pages=2)
+    asyncio.run(queue.run(task_id))
+
+    assert max_active == 2
+    assert database.get_task(task_id).status is TaskStatus.COMPLETED
+
+
+def test_queue_default_remains_sequential(tmp_path: Path) -> None:
+    database = Database(tmp_path / "app.db")
+    database.initialize()
+    task_id, _ = _task_with_pages(database, 4)
+    active = 0
+    max_active = 0
+
+    async def process(page, _output_dir, on_progress):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return f"result-{page.id}"
+
+    queue = PersistentTaskQueue(database, process)
+    asyncio.run(queue.run(task_id))
+
+    assert max_active == 1
+    assert database.get_task(task_id).status is TaskStatus.COMPLETED
