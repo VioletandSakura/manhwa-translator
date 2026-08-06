@@ -90,3 +90,59 @@ def test_rapidocr_recognition_runs_in_worker_thread() -> None:
 
     assert observed
     assert observed[0] != threading.main_thread().name
+
+
+class _RefineEngine:
+    def __init__(self, text: str, confidence: float) -> None:
+        self.text = text
+        self.confidence = confidence
+        self.calls = 0
+
+    def recognize_txt(self, crops):
+        self.calls += 1
+        return SimpleNamespace(txts=[self.text], scores=[self.confidence])
+
+
+def _cached_region(text: str, confidence: float) -> TextRegion:
+    return TextRegion(
+        id="cached",
+        polygon=[(10, 10), (100, 10), (100, 40), (10, 40)],
+        metadata={"ocr_source_text": text, "ocr_confidence": confidence},
+    )
+
+
+def test_rapidocr_refines_low_confidence_cached_region() -> None:
+    engine = _RefineEngine("\u5165\u3063\u3066", 0.82)
+    ocr = RapidOCREngine(engine)
+    region = _cached_region("\u5165\u3066", 0.535)
+
+    regions = asyncio.run(ocr.recognize(np.zeros((60, 120, 3), dtype=np.uint8), [region]))
+
+    assert regions[0].source_text == "\u5165\u3063\u3066"
+    assert regions[0].confidence == pytest.approx(0.82)
+    assert regions[0].metadata.get("ocr_refined") is True
+    assert engine.calls >= 1
+
+
+def test_rapidocr_keeps_high_confidence_cached_region_untouched() -> None:
+    engine = _RefineEngine("\u5165\u3063\u3066", 0.99)
+    ocr = RapidOCREngine(engine)
+    region = _cached_region("\u5165\u3066", 0.9)
+
+    regions = asyncio.run(ocr.recognize(np.zeros((60, 120, 3), dtype=np.uint8), [region]))
+
+    assert regions[0].source_text == "\u5165\u3066"
+    assert regions[0].confidence == pytest.approx(0.9)
+    assert "ocr_refined" not in regions[0].metadata
+    assert engine.calls == 0
+
+
+def test_rapidocr_rejects_unrelated_refinement_reading() -> None:
+    engine = _RefineEngine("213", 0.7)
+    ocr = RapidOCREngine(engine)
+    region = _cached_region("LMEIS", 0.548)
+
+    regions = asyncio.run(ocr.recognize(np.zeros((60, 120, 3), dtype=np.uint8), [region]))
+
+    assert regions[0].source_text == "LMEIS"
+    assert "ocr_refined" not in regions[0].metadata
