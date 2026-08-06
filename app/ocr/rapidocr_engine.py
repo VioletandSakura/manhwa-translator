@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 from typing import Any
 
 import numpy as np
@@ -16,6 +18,7 @@ class RapidOCREngine:
 
     def __init__(self, engine: Any | None = None) -> None:
         self._engine = engine
+        self._inference_lock = threading.Lock()
 
     def _get_engine(self) -> Any:
         if self._engine is not None:
@@ -28,8 +31,8 @@ class RapidOCREngine:
         return self._engine
 
     async def recognize(self, image: np.ndarray, regions: list[TextRegion]) -> list[TextRegion]:
-        engine = self._get_engine()
         height, width = image.shape[:2]
+        pending: list[tuple[TextRegion, np.ndarray]] = []
         for region in regions:
             if "ocr_source_text" in region.metadata:
                 region.source_text = str(region.metadata.get("ocr_source_text") or "")
@@ -42,10 +45,25 @@ class RapidOCREngine:
             if crop.size == 0:
                 region.needs_review = True
                 continue
-            text, confidence = self._recognize_crop(engine, crop)
-            region.source_text = text
-            region.confidence = confidence
+            pending.append((region, crop))
+        if pending:
+            for region, text, confidence in await asyncio.to_thread(self._recognize_crops, pending):
+                region.source_text = text
+                region.confidence = confidence
         return regions
+
+    def infer(self, image: np.ndarray) -> Any:
+        with self._inference_lock:
+            return self._get_engine()(image)
+
+    def _recognize_crops(self, crops: list[tuple[TextRegion, np.ndarray]]) -> list[tuple[TextRegion, str, float]]:
+        engine = self._get_engine()
+        results: list[tuple[TextRegion, str, float]] = []
+        with self._inference_lock:
+            for region, crop in crops:
+                text, confidence = self._recognize_crop(engine, crop)
+                results.append((region, text, confidence))
+        return results
 
     @staticmethod
     def _recognize_crop(engine: Any, crop: np.ndarray) -> tuple[str, float]:

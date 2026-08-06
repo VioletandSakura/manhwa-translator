@@ -173,3 +173,23 @@ def test_application_rerenders_modified_metadata_without_api_call(tmp_path: Path
     translated = asyncio.run(application.rerender_metadata(metadata))
 
     assert translated.is_file()
+
+
+def test_application_rerenders_metadata_with_chinese_paths(tmp_path: Path) -> None:
+    application = _application(tmp_path)
+    output = tmp_path / "\u8f93\u51fa\u76ee\u5f55"
+    (output / "inpainted").mkdir(parents=True)
+    (output / "metadata").mkdir()
+    Image.new("RGB", (120, 80), "white").save(
+        output / "inpainted" / "\u7b2c1\u9875_inpainted.png"
+    )
+    metadata = output / "metadata" / "\u7b2c1\u9875.json"
+    metadata.write_text(
+        '{"regions":[{"id":"r1","polygon":[[10,10],[100,10],[100,60],[10,60]],'
+        '"translated_text":"\u4f60\u597d"}]}',
+        encoding="utf-8",
+    )
+
+    translated = asyncio.run(application.rerender_metadata(metadata))
+
+    assert translated.is_file()

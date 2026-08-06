@@ -17,6 +17,7 @@ class PillowTextRenderer:
         self.max_font_size = max_font_size
         self.color = color
         self.stroke_width = stroke_width
+        self._font_cache: dict[int, ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
 
     async def render(self, image: np.ndarray, regions: list[TextRegion]) -> np.ndarray:
         canvas = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
@@ -67,9 +68,15 @@ class PillowTextRenderer:
         return "\n".join(character for character in text if character != "\n")
 
     def _load_font(self, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+        cached = self._font_cache.get(size)
+        if cached is not None:
+            return cached
         if self.font_path and self.font_path.exists():
-            return ImageFont.truetype(str(self.font_path), size=size)
-        return ImageFont.load_default(size=size)
+            font = ImageFont.truetype(str(self.font_path), size=size)
+        else:
+            font = ImageFont.load_default(size=size)
+        self._font_cache[size] = font
+        return font
 
     @staticmethod
     def _find_font() -> Path | None:
@@ -80,4 +87,3 @@ class PillowTextRenderer:
             Path(r"C:\Windows\Fonts\arial.ttf"),
         ]
         return next((path for path in candidates if path.exists()), None)
-

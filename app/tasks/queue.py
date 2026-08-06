@@ -99,6 +99,7 @@ class PersistentTaskQueue:
             if self.on_page_completed is not None:
                 self.on_page_completed(task_id, self.database.get_page(page.id))
         self._finish_task(task_id)
+        self.database.close()
 
     def _finish_task(self, task_id: str) -> None:
         pages = self.database.list_task_pages(task_id)

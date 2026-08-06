@@ -9,6 +9,7 @@ import uuid
 import zipfile
 
 import cv2
+import numpy as np
 
 from app.detection.rapidocr_detector import RapidOCRDetector
 from app.inpainting.fallback import FallbackInpainter
@@ -240,13 +241,19 @@ class TranslationApplication:
         ]
         task_output = metadata_path.parent.parent
         inpainted_path = task_output / "inpainted" / f"{metadata_path.stem}_inpainted.png"
-        image = cv2.imread(str(inpainted_path), cv2.IMREAD_COLOR)
+        image = cv2.imdecode(
+            np.frombuffer(inpainted_path.read_bytes(), dtype=np.uint8),
+            cv2.IMREAD_COLOR,
+        )
         if image is None:
             raise ValueError(f"缺少修复图，无法重新渲染：{inpainted_path}")
         rendered = await PillowTextRenderer().render(image, regions)
         translated_path = task_output / "translated" / f"{metadata_path.stem}_translated.png"
         translated_path.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(translated_path), rendered)
+        succeeded, encoded = cv2.imencode(".png", rendered)
+        if not succeeded:
+            raise ValueError(f"无法编码重渲染图片：{translated_path.name}")
+        translated_path.write_bytes(encoded.tobytes())
         return translated_path
 
     def load_api_config(self) -> dict[str, object]:

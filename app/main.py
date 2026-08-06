@@ -23,7 +23,9 @@ def create_application() -> tuple[QApplication, MainWindow, MainController]:
 
 
 def main() -> int:
-    application, window, _controller = create_application()
+    application, window, controller = create_application()
     window.show()
-    return application.exec()
-
+    try:
+        return application.exec()
+    finally:
+        controller.application.database.close()

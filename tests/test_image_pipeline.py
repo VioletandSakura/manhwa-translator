@@ -205,3 +205,26 @@ def test_inpainter_and_renderer_preserve_resolution() -> None:
     assert cleaned.shape == image.shape
     assert rendered.shape == image.shape
     assert np.any(rendered != cleaned)
+
+
+def test_renderer_caches_fonts_by_size(tmp_path: Path, monkeypatch) -> None:
+    import PIL.ImageFont as ImageFont
+
+    font_path = tmp_path / "font.ttf"
+    font_path.write_bytes(b"")
+    renderer = PillowTextRenderer(font_path=font_path)
+    calls: list[tuple[str, int]] = []
+
+    def fake_truetype(path: str, size: int):
+        calls.append((path, size))
+        return object()
+
+    monkeypatch.setattr(ImageFont, "truetype", fake_truetype)
+
+    first = renderer._load_font(18)
+    second = renderer._load_font(18)
+    third = renderer._load_font(24)
+
+    assert first is second
+    assert third is not first
+    assert calls == [(str(font_path), 18), (str(font_path), 24)]

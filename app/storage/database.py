@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import threading
 import uuid
-from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,17 +18,35 @@ def _now() -> str:
 class Database:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
+        self._local = threading.local()
 
     def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
+        connection = getattr(self._local, "connection", None)
+        if connection is None:
+            connection = sqlite3.connect(self.path)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA synchronous = NORMAL")
+            connection.execute("PRAGMA busy_timeout = 5000")
+            self._local.connection = connection
         return connection
+
+    def close(self) -> None:
+        connection = getattr(self._local, "connection", None)
+        if connection is not None:
+            connection.close()
+            self._local.connection = None
+
+    def __enter__(self) -> sqlite3.Connection:
+        return self.connect()
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        return None
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS tasks (
@@ -101,7 +119,7 @@ class Database:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def upsert_api_channel(self, channel: ApiChannelRecord) -> None:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             connection.execute(
                 """INSERT INTO api_channels(
                     id, service_name, enabled, base_url, model, timeout_seconds,
@@ -127,24 +145,24 @@ class Database:
 
     def list_api_channels(self, *, enabled_only: bool = False) -> list[ApiChannelRecord]:
         where = "WHERE enabled = 1" if enabled_only else ""
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             rows = connection.execute(f"SELECT * FROM api_channels {where} ORDER BY priority, service_name, id").fetchall()
         return [self._to_api_channel(row) for row in rows]
 
     def get_api_channel(self, channel_id: str) -> ApiChannelRecord:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             row = connection.execute("SELECT * FROM api_channels WHERE id = ?", (channel_id,)).fetchone()
         if row is None:
             raise KeyError(f"API通道不存在：{channel_id}")
         return self._to_api_channel(row)
 
     def delete_api_channel(self, channel_id: str) -> None:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             connection.execute("DELETE FROM api_channels WHERE id = ?", (channel_id,))
             connection.commit()
 
     def set_api_channel_health(self, channel_id: str, *, verified: bool, last_error: str | None) -> None:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             connection.execute(
                 "UPDATE api_channels SET verified = ?, last_error = ?, updated_at = ? WHERE id = ?",
                 (int(verified), last_error, _now(), channel_id),
@@ -154,7 +172,7 @@ class Database:
     def upsert_library_entry(self, entry: LibraryEntry) -> None:
         if entry.category not in {"glossary", "prompt", "replacement", "preset"}:
             raise ValueError(f"不支持的资料类别：{entry.category}")
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             connection.execute(
                 """INSERT INTO library_entries(id, category, name, payload, enabled, sort_order, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -166,28 +184,28 @@ class Database:
             connection.commit()
 
     def list_library_entries(self, category: str) -> list[LibraryEntry]:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM library_entries WHERE category = ? ORDER BY sort_order, name, id", (category,)
             ).fetchall()
         return [self._to_library_entry(row) for row in rows]
 
     def get_library_entry(self, entry_id: str) -> LibraryEntry:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             row = connection.execute("SELECT * FROM library_entries WHERE id = ?", (entry_id,)).fetchone()
         if row is None:
             raise KeyError(f"资料条目不存在：{entry_id}")
         return self._to_library_entry(row)
 
     def delete_library_entry(self, entry_id: str) -> None:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             connection.execute("DELETE FROM library_entries WHERE id = ?", (entry_id,))
             connection.commit()
 
     def create_task(self, source_path: str, output_dir: str) -> str:
         task_id = uuid.uuid4().hex
         timestamp = _now()
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             connection.execute(
                 "INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?)",
                 (task_id, source_path, output_dir, TaskStatus.PENDING.value, timestamp, timestamp),
@@ -197,7 +215,7 @@ class Database:
 
     def add_page(self, task_id: str, page_index: int, source_path: str) -> str:
         page_id = uuid.uuid4().hex
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             connection.execute(
                 """INSERT INTO pages
                 (id, task_id, page_index, source_path, status, stage, progress)
@@ -208,7 +226,7 @@ class Database:
         return page_id
 
     def update_task_status(self, task_id: str, status: TaskStatus) -> None:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             connection.execute(
                 "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
                 (status.value, _now(), task_id),
@@ -216,7 +234,7 @@ class Database:
             connection.commit()
 
     def repair_completed_task_statuses(self) -> int:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             cursor = connection.execute(
                 """UPDATE tasks
                 SET status = ?, updated_at = ?
@@ -247,7 +265,7 @@ class Database:
     ) -> None:
         if not 0 <= progress <= 100:
             raise ValueError("页面进度必须在0到100之间")
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             connection.execute(
                 "UPDATE pages SET status = ?, stage = ?, progress = ?, error = ? WHERE id = ?",
                 (status.value, stage, progress, error, page_id),
@@ -255,12 +273,12 @@ class Database:
             connection.commit()
 
     def increment_page_attempt(self, page_id: str) -> None:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             connection.execute("UPDATE pages SET attempt_count = attempt_count + 1 WHERE id = ?", (page_id,))
             connection.commit()
 
     def reset_page_for_retry(self, page_id: str) -> None:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             connection.execute(
                 "UPDATE pages SET status = ?, stage = '', progress = 0, error = NULL WHERE id = ?",
                 (PageStatus.PENDING.value, page_id),
@@ -268,12 +286,12 @@ class Database:
             connection.commit()
 
     def set_page_result(self, page_id: str, result_path: str | None) -> None:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             connection.execute("UPDATE pages SET result_path = ? WHERE id = ?", (result_path, page_id))
             connection.commit()
 
     def get_task(self, task_id: str) -> TaskRecord:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if row is None:
             raise KeyError(f"任务不存在: {task_id}")
@@ -287,7 +305,7 @@ class Database:
         )
 
     def list_tasks(self, limit: int = 200) -> list[TaskRecord]:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (max(1, limit),)
             ).fetchall()
@@ -300,14 +318,14 @@ class Database:
         ]
 
     def get_page(self, page_id: str) -> PageRecord:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             row = connection.execute("SELECT * FROM pages WHERE id = ?", (page_id,)).fetchone()
         if row is None:
             raise KeyError(f"页面不存在: {page_id}")
         return self._to_page(row)
 
     def list_resumable_pages(self, task_id: str) -> list[PageRecord]:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             rows = connection.execute(
                 """SELECT * FROM pages
                 WHERE task_id = ? AND status IN (?, ?, ?) ORDER BY page_index""",
@@ -316,14 +334,14 @@ class Database:
         return [self._to_page(row) for row in rows]
 
     def list_task_pages(self, task_id: str) -> list[PageRecord]:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM pages WHERE task_id = ? ORDER BY page_index", (task_id,)
             ).fetchall()
         return [self._to_page(row) for row in rows]
 
     def set_setting(self, key: str, value: str) -> None:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             connection.execute(
                 """INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
@@ -332,7 +350,7 @@ class Database:
             connection.commit()
 
     def get_setting(self, key: str, default: str = "") -> str:
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             row = connection.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
         return default if row is None else str(row["value"])
 
@@ -358,7 +376,7 @@ class Database:
         translated_text: str,
     ) -> None:
         cache_key = self._cache_key(provider, model, source_language, target_language, source_text)
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             connection.execute(
                 "INSERT OR REPLACE INTO translation_cache VALUES (?, ?, ?)",
                 (cache_key, translated_text, _now()),
@@ -375,12 +393,63 @@ class Database:
         source_text: str,
     ) -> str | None:
         cache_key = self._cache_key(provider, model, source_language, target_language, source_text)
-        with closing(self.connect()) as connection:
+        with self.connect() as connection:
             row = connection.execute(
                 "SELECT translated_text FROM translation_cache WHERE cache_key = ?",
                 (cache_key,),
             ).fetchone()
         return None if row is None else str(row["translated_text"])
+
+    def get_translation_cache_many(
+        self,
+        *,
+        provider: str,
+        model: str,
+        source_language: str,
+        target_language: str,
+        texts: list[str],
+    ) -> dict[str, str]:
+        if not texts:
+            return {}
+        keys = {
+            text: self._cache_key(provider, model, source_language, target_language, text)
+            for text in texts
+        }
+        placeholders = ",".join("?" for _ in keys)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT cache_key, translated_text FROM translation_cache "
+                f"WHERE cache_key IN ({placeholders})",
+                tuple(keys.values()),
+            ).fetchall()
+        found = {str(row["cache_key"]): str(row["translated_text"]) for row in rows}
+        return {text: found[key] for text, key in keys.items() if key in found}
+
+    def put_translation_cache_many(
+        self,
+        *,
+        provider: str,
+        model: str,
+        source_language: str,
+        target_language: str,
+        entries: dict[str, str],
+    ) -> None:
+        if not entries:
+            return
+        timestamp = _now()
+        rows = [
+            (
+                self._cache_key(provider, model, source_language, target_language, text),
+                translated,
+                timestamp,
+            )
+            for text, translated in entries.items()
+        ]
+        with self.connect() as connection:
+            connection.executemany(
+                "INSERT OR REPLACE INTO translation_cache VALUES (?, ?, ?)", rows
+            )
+            connection.commit()
 
     @staticmethod
     def _to_page(row: sqlite3.Row) -> PageRecord:

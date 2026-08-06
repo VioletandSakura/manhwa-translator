@@ -67,3 +67,44 @@ def test_translation_cache_uses_provider_model_and_languages(tmp_path: Path) -> 
         target_language="zh-Hans",
         source_text="こんにちは",
     ) == "你好"
+
+
+def test_database_reuses_connection_per_thread_and_close_resets(tmp_path: Path) -> None:
+    database = Database(tmp_path / "app.db")
+    database.initialize()
+
+    first = database.connect()
+    assert database.connect() is first
+
+    database.close()
+
+    assert database.connect() is not first
+
+
+def test_translation_cache_batch_read_write(tmp_path: Path) -> None:
+    database = Database(tmp_path / "app.db")
+    database.initialize()
+    database.put_translation_cache_many(
+        provider="DeepSeek",
+        model="deepseek-chat",
+        source_language="auto",
+        target_language="zh-Hans",
+        entries={"hello": "\u4f60\u597d", "world": "\u4e16\u754c"},
+    )
+
+    found = database.get_translation_cache_many(
+        provider="DeepSeek",
+        model="deepseek-chat",
+        source_language="auto",
+        target_language="zh-Hans",
+        texts=["hello", "missing", "world"],
+    )
+
+    assert found == {"hello": "\u4f60\u597d", "world": "\u4e16\u754c"}
+    assert database.get_translation_cache_many(
+        provider="DeepSeek",
+        model="deepseek-chat",
+        source_language="auto",
+        target_language="zh-Hans",
+        texts=[],
+    ) == {}

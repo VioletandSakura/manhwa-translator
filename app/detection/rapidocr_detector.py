@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import math
 import uuid
 
@@ -16,7 +17,7 @@ class RapidOCRDetector:
         self.ocr = ocr
 
     async def detect(self, image: np.ndarray) -> list[TextRegion]:
-        output = self.ocr._get_engine()(image)
+        output = await asyncio.to_thread(self.ocr.infer, image)
         payload = output[0] if isinstance(output, tuple) else output
         boxes = self._as_list(getattr(payload, "boxes", None))
         texts = self._as_list(getattr(payload, "txts", None))

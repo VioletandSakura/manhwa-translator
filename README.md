@@ -108,7 +108,6 @@ powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
 
 ```powershell
 $env:QT_QPA_PLATFORM='offscreen'
-$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD='1'
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 

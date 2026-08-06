@@ -73,3 +73,20 @@ def test_rapidocr_detector_reuses_recognition_result() -> None:
     assert recognized[0].source_text == "漫画文字"
     assert recognized[0].confidence == pytest.approx(0.88)
     assert recognized[0].metadata["detector"] == "rapidocr"
+
+
+def test_rapidocr_recognition_runs_in_worker_thread() -> None:
+    import threading
+
+    observed: list[str] = []
+
+    def engine(crop):
+        observed.append(threading.current_thread().name)
+        return SimpleNamespace(txts=["ok"], scores=[0.9])
+
+    ocr = RapidOCREngine(engine)
+
+    asyncio.run(ocr.recognize(np.zeros((50, 100, 3), dtype=np.uint8), [_region()]))
+
+    assert observed
+    assert observed[0] != threading.main_thread().name
