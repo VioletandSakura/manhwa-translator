@@ -102,3 +102,26 @@ def test_rate_limiter_waits_when_rpm_window_is_full() -> None:
 
     asyncio.run(scenario())
     assert waits == [60]
+
+
+def test_router_recreates_loop_bound_resources_when_event_loop_changes(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "app.db")
+    database.initialize()
+    database.upsert_api_channel(_channel("primary", 10))
+    credentials = CredentialStore(MemoryCredentialBackend())
+    credentials.save("primary", "key-1")
+    created: list[FakeTranslator] = []
+
+    def factory(channel, _key):
+        translator = FakeTranslator(channel.id, [])
+        created.append(translator)
+        return translator
+
+    router = ChannelRouterTranslator(database, credentials, factory)
+
+    asyncio.run(router.translate(["one"], "en", "zh-Hans"))
+    asyncio.run(router.translate(["two"], "en", "zh-Hans"))
+
+    assert len(created) == 2

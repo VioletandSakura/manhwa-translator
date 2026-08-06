@@ -60,8 +60,18 @@ class ChannelRouterTranslator:
         self._translators: dict[str, Translator] = {}
         self._limiters: dict[str, AsyncRateLimiter] = {}
         self._semaphores: dict[str, asyncio.Semaphore] = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def translate(self, texts: list[str], source_language: str, target_language: str) -> list[str]:
+        loop = asyncio.get_running_loop()
+        if self._loop is not loop:
+            # httpx clients and asyncio primitives are bound to the event loop
+            # that created them; rebuild them when a new run starts (e.g. retry
+            # after a batch finished) to avoid "Event loop is closed" errors.
+            self._loop = loop
+            self._translators.clear()
+            self._limiters.clear()
+            self._semaphores.clear()
         channels = self._ordered_channels()
         if not channels:
             raise TranslationServiceError("没有已启用且验证通过的API通道")

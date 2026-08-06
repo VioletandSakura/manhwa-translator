@@ -51,6 +51,7 @@ class MainController(QObject):
         self._workers: dict[QThread, AsyncWorker] = {}
         self._active_queue = None
         self._active_task_id: str | None = None
+        self._queue_running = False
         self._active_page_ids: list[str] = []
         self._load_config()
         window.start_requested.connect(self.start_translation)
@@ -355,6 +356,7 @@ class MainController(QObject):
             return task_id
 
         self._start_worker(operation, on_completed=self._batch_completed, on_failed=self._translation_failed)
+        self._queue_running = True
 
     @Slot()
     def resume_history_task(self) -> None:
@@ -383,6 +385,7 @@ class MainController(QObject):
         self.window.update_queue_page(page_index, stage)
 
     def _batch_completed(self, task_id: str) -> None:
+        self._queue_running = False
         task = self.application.database.get_task(task_id)
         self.window.set_progress("完成" if task.status.value == "completed" else task.status.value, 100)
         self.window.append_log(f"批量任务结束：{task.status.value}")
@@ -426,6 +429,9 @@ class MainController(QObject):
     def retry_failed_page(self) -> None:
         if self._active_queue is None or self._active_task_id is None:
             self.window.show_error("当前没有可重试的任务")
+            return
+        if self._queue_running:
+            self.window.show_error("当前任务仍在处理中，请等待完成后再重试失败页面")
             return
         row = self.window.queue_table.currentRow()
         if not 0 <= row < len(self._active_page_ids):
@@ -537,6 +543,7 @@ class MainController(QObject):
         self.window.set_busy(False)
 
     def _translation_failed(self, message: str) -> None:
+        self._queue_running = False
         self.window.set_progress("失败", 0)
         self.window.append_log(f"处理失败：{message}")
         self.window.set_busy(False)

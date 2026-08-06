@@ -52,6 +52,7 @@ def test_controller_processes_folder_as_persistent_offline_batch(tmp_path: Path,
     task_id = asyncio.run(captured["operation"](window.set_progress))
     captured["completed"](task_id)
 
+    assert controller._queue_running is False
     assert application.database.get_task(task_id).status is TaskStatus.COMPLETED
     assert window.queue_table.rowCount() == 2
     task = application.database.get_task(task_id)
@@ -194,3 +195,26 @@ def test_application_rerenders_metadata_with_chinese_paths(tmp_path: Path) -> No
     translated = asyncio.run(application.rerender_metadata(metadata))
 
     assert translated.is_file()
+
+
+def test_retry_is_rejected_while_queue_run_is_active(
+    tmp_path: Path, qtbot, monkeypatch
+) -> None:
+    application = _application(tmp_path)
+    window = MainWindow(application.paths)
+    qtbot.addWidget(window)
+    controller = MainController(application, window)
+    controller._active_queue = object()
+    controller._active_task_id = "task-1"
+    controller._queue_running = True
+    errors: list[str] = []
+    started: list[object] = []
+    monkeypatch.setattr(window, "show_error", errors.append)
+    monkeypatch.setattr(
+        controller, "_start_worker", lambda *args, **kwargs: started.append(args)
+    )
+
+    controller.retry_failed_page()
+
+    assert started == []
+    assert errors and "处理中" in errors[0]
