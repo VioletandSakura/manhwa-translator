@@ -13,7 +13,7 @@ _RESERVED_WINDOWS_NAMES = {
     *(f"COM{index}" for index in range(1, 10)),
     *(f"LPT{index}" for index in range(1, 10)),
 }
-_BATCH_ARCHIVE_EXTENSIONS = {".zip", ".epub"}
+_BATCH_ARCHIVE_EXTENSIONS = {".zip", ".cbz", ".epub"}
 
 
 def batch_requires_name(sources: list[Path]) -> bool:
@@ -24,7 +24,7 @@ def batch_requires_name(sources: list[Path]) -> bool:
 
 
 def resolve_batch_output(output_root: Path, batch_name: str, *, require_name: bool) -> Path:
-    """Resolve a safe, direct child output directory for a named batch."""
+    """解析安全的单层批次日录；名称必须避开 Windows 保留字与路径字符。"""
     root = Path(output_root)
     name = batch_name.strip()
     if not name:

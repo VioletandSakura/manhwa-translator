@@ -18,6 +18,8 @@ from .main_window import MainWindow
 
 
 class AsyncWorker(QObject):
+    """在 QThread 中执行异步操作并把结果/错误送回主线程。"""
+
     progress = Signal(str, int)
     completed = Signal(object)
     failed = Signal(str)
@@ -39,6 +41,8 @@ class AsyncWorker(QObject):
 
 
 class MainController(QObject):
+    """界面事件与应用服务的桥接层，管理任务队列和后台线程。"""
+
     page_preview_ready = Signal(str)
     page_status_ready = Signal(int, str, str)
     page_progress_ready = Signal(int, int, int, str)

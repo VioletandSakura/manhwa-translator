@@ -35,6 +35,8 @@ class PipelineResult:
 
 
 class PagePipeline:
+    """单页流水线：检测 -> OCR -> 翻译 -> 擦字 -> 渲染 -> 元数据。"""
+
     SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
     def __init__(self, *, detector: TextDetector, ocr: OCREngine, translator, inpainter: Inpainter, renderer: TextRenderer) -> None:
@@ -45,6 +47,7 @@ class PagePipeline:
         self.renderer = renderer
 
     async def process(self, source_path: Path, output_dir: Path, options: PipelineOptions, *, on_progress: ProgressCallback | None = None) -> PipelineResult:
+        """处理一张图片并输出全部工件，同时报告阶段进度。"""
         source_path = Path(source_path)
         if source_path.suffix.lower() not in self.SUPPORTED_EXTENSIONS:
             raise ValueError(f"不支持的图片格式: {source_path.suffix}")

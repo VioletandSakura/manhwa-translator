@@ -6,6 +6,8 @@ from app.domain.models import TextRegion
 
 
 class FallbackInpainter:
+    """优先使用 LaMa 擦字，失败时自动回退到 OpenCV。"""
+
     def __init__(self, primary, fallback) -> None:
         self.primary = primary
         self.fallback = fallback

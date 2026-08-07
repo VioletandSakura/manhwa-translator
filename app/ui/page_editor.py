@@ -88,6 +88,8 @@ class _SnapshotCommand(QUndoCommand):
 
 
 class PageEditorWidget(QWidget):
+    """单页可视化编辑器：移动/缩放/旋转文本框、涂擦与撤销重做。"""
+
     def __init__(self) -> None:
         super().__init__()
         self.scene = QGraphicsScene(self)

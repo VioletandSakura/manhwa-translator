@@ -49,6 +49,8 @@ class BatchCreation:
 
 
 class TranslationApplication:
+    """个人漫画翻译器的应用门面：装配 OCR、翻译、擦字、渲染与任务队列。"""
+
     CHANNEL_ID = "deepseek-default"
     DEFAULT_API = {
         "service_name": "DeepSeek",
@@ -73,11 +75,13 @@ class TranslationApplication:
         self._rapidocr_engine: RapidOCREngine | None = None
 
     def initialize(self) -> None:
+        """准备运行时目录、初始化数据库并修复异常中断的任务状态。"""
         self.paths.ensure_runtime_directories()
         self.database.initialize()
         self.database.repair_completed_task_statuses()
 
     def save_api_config(self, values: dict[str, object]) -> None:
+        """保存旧版单通道 API 表单，并同步到默认通道。"""
         service_name = str(values.get("service_name") or "").strip()
         base_url = str(values.get("base_url") or "").strip()
         model = self._normalize_api_model(service_name, base_url, str(values.get("model") or "").strip())
@@ -88,23 +92,8 @@ class TranslationApplication:
             self.credentials.save(self.CHANNEL_ID, api_key)
         if not self.credentials.load(self.CHANNEL_ID):
             raise ValueError("请输入并保存API Key；Windows凭据管理器中尚无此通道的密钥")
-        settings = {
-            "service_name": service_name,
-            "base_url": base_url,
-            "model": model,
-            "timeout_seconds": str(int(values.get("timeout_seconds") or 60)),
-            "retries": str(int(values.get("retries") or 2)),
-        }
-        for key, value in settings.items():
-            self.database.set_setting(f"api.{key}", value)
-        try:
-            existing = self.database.get_api_channel(self.CHANNEL_ID)
-            verified = existing.verified
-            last_error = existing.last_error
-        except KeyError:
-            verified = False
-            last_error = None
-        self.database.upsert_api_channel(
+        verified, last_error = self._existing_channel_state(self.CHANNEL_ID)
+        self._persist_api_channel(
             ApiChannelRecord(
                 id=self.CHANNEL_ID,
                 service_name=service_name,
@@ -124,6 +113,7 @@ class TranslationApplication:
         self.logger.info(f"已保存API配置：{service_name} / {model}")
 
     def create_batch_task(self, sources: list[Path], output_dir: Path) -> BatchCreation:
+        """导入输入并创建持久化的批量翻译任务。"""
         importer = InputImporter(self.paths.data_dir / "imports")
         imported = importer.import_sources([Path(source) for source in sources])
         source_label = " | ".join(str(Path(source)) for source in sources)
@@ -134,6 +124,7 @@ class TranslationApplication:
         return BatchCreation(task_id=task_id, page_count=len(imported.pages), imported=imported)
 
     def save_api_channel(self, values: dict[str, object]) -> str:
+        """保存或更新一个 API 通道，密钥只写入 Windows 凭据管理器。"""
         channel_id = str(values.get("id") or "").strip()
         if not re.fullmatch(r"[A-Za-z0-9_-]+", channel_id):
             raise ValueError("API通道编号只能包含字母、数字、下划线和短横线")
@@ -142,17 +133,13 @@ class TranslationApplication:
         model = self._normalize_api_model(service_name, base_url, str(values.get("model") or "").strip())
         if not service_name or not model or not base_url.startswith(("https://", "http://")):
             raise ValueError("服务名称、有效Base URL和模型不能为空")
-        try:
-            existing = self.database.get_api_channel(channel_id)
-            verified, last_error = existing.verified, existing.last_error
-        except KeyError:
-            verified, last_error = False, None
+        verified, last_error = self._existing_channel_state(channel_id)
         api_key = str(values.get("api_key") or "").strip()
         if api_key:
             self.credentials.save(channel_id, api_key)
         if not self.credentials.load(channel_id):
             raise ValueError("请输入并保存API Key；Windows凭据管理器中尚无此通道的密钥")
-        self.database.upsert_api_channel(
+        self._persist_api_channel(
             ApiChannelRecord(
                 id=channel_id,
                 service_name=service_name,
@@ -169,16 +156,28 @@ class TranslationApplication:
                 last_error=last_error,
             )
         )
-        if channel_id == self.CHANNEL_ID:
-            for key, value in {
-                "service_name": service_name,
-                "base_url": base_url,
-                "model": model,
-                "timeout_seconds": str(max(5, int(values.get("timeout_seconds") or 60))),
-                "retries": str(max(0, int(values.get("retries") or 2))),
-            }.items():
-                self.database.set_setting(f"api.{key}", str(value))
         return channel_id
+
+    def _existing_channel_state(self, channel_id: str) -> tuple[bool, str | None]:
+        """读取通道已有的验证状态，新通道返回未验证。"""
+        try:
+            existing = self.database.get_api_channel(channel_id)
+            return existing.verified, existing.last_error
+        except KeyError:
+            return False, None
+
+    def _persist_api_channel(self, channel: ApiChannelRecord) -> None:
+        """写入通道记录；默认通道同时同步旧版单通道设置。"""
+        self.database.upsert_api_channel(channel)
+        if channel.id == self.CHANNEL_ID:
+            for key, value in {
+                "service_name": channel.service_name,
+                "base_url": channel.base_url,
+                "model": channel.model,
+                "timeout_seconds": str(channel.timeout_seconds),
+                "retries": str(channel.retries),
+            }.items():
+                self.database.set_setting(f"api.{key}", value)
 
     @staticmethod
     def _normalize_api_model(service_name: str, base_url: str, model: str) -> str:
@@ -187,10 +186,12 @@ class TranslationApplication:
         return model
 
     def delete_api_channel(self, channel_id: str) -> None:
+        """删除 API 通道及其本地密钥。"""
         self.database.delete_api_channel(channel_id)
         self.credentials.revoke(channel_id)
 
     def save_library_content(self, category: str, name: str, payload: str) -> str:
+        """保存术语表、提示词或替换规则等内容条目。"""
         clean_name = name.strip()
         if not clean_name:
             raise ValueError("名称不能为空")
@@ -208,6 +209,7 @@ class TranslationApplication:
         return self.database.list_library_entries(category)
 
     def export_task_zip(self, task_id: str, target_path: Path) -> Path:
+        """把任务中已完成的译图打包为 ZIP。"""
         target_path = Path(target_path)
         target_path.parent.mkdir(parents=True, exist_ok=True)
         used_names: set[str] = set()
@@ -265,6 +267,7 @@ class TranslationApplication:
             return None
 
     async def rerender_metadata(self, metadata_path: Path) -> Path:
+        """根据人工修改后的元数据重新渲染译图。"""
         metadata_path = Path(metadata_path)
         document = json.loads(metadata_path.read_text(encoding="utf-8"))
         regions = [
@@ -299,6 +302,7 @@ class TranslationApplication:
         return translated_path
 
     def load_api_config(self) -> dict[str, object]:
+        """读取旧版单通道配置，密钥只以布尔标记返回。"""
         loaded: dict[str, object] = {
             key: self.database.get_setting(f"api.{key}", str(default))
             for key, default in self.DEFAULT_API.items()
@@ -309,17 +313,21 @@ class TranslationApplication:
         return loaded
 
     def revoke_api_key(self) -> None:
+        """撤销默认通道保存的本地 API 密钥。"""
         self.credentials.revoke(self.CHANNEL_ID)
         self.logger.info("已撤销本地保存的API Key")
 
     def revoke_api_channel_key(self, channel_id: str) -> None:
+        """撤销指定 API 通道保存的本地密钥。"""
         self.credentials.revoke(channel_id)
         self.logger.info(f"已撤销API通道密钥：{channel_id}")
 
     def list_api_channels(self) -> list[ApiChannelRecord]:
+        """列出全部 API 通道配置。"""
         return self.database.list_api_channels()
 
     def build_translator(self) -> CachedTranslator:
+        """装配带 SQLite 缓存的多通道路由翻译器。"""
         channels = self.database.list_api_channels(enabled_only=True)
         if not channels:
             raise ValueError("尚未配置可用的API通道")
@@ -353,6 +361,7 @@ class TranslationApplication:
         inpainting_engine: str = "opencv",
         high_accuracy_ocr: bool = False,
     ) -> PagePipeline:
+        """按配置装配 OCR、擦字与渲染流水线。"""
         translator = self.build_translator() if translate else _UnusedTranslator()
         detector_ocr = self._get_rapidocr_engine(high_accuracy_ocr=high_accuracy_ocr)
         ocr = (
@@ -406,6 +415,7 @@ class TranslationApplication:
         on_page_failed=None,
         on_page_progress=None,
     ) -> PersistentTaskQueue:
+        """装配可暂停、可恢复、失败自动重试的持久化任务队列。"""
         pipeline = self.build_pipeline(
             translate=options.translate,
             ocr_engine=ocr_engine,
@@ -492,6 +502,7 @@ class TranslationApplication:
         on_progress: ProgressCallback | None = None,
         pipeline: PagePipeline | None = None,
     ) -> ProcessingOutcome:
+        """处理单张页面并持久化检查点。"""
         task_id = self.database.create_task(str(source_path), str(output_dir))
         page_id = self.database.add_page(task_id, 0, str(source_path))
         self.database.update_task_status(task_id, TaskStatus.RUNNING)

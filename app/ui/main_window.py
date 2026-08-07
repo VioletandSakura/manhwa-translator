@@ -34,6 +34,8 @@ from app.ui.page_editor import PageEditorWidget
 
 
 class MainWindow(QMainWindow):
+    """主窗口：翻译、API、OCR、术语、历史与日志等全部设置页。"""
+
     start_requested = Signal()
     api_save_requested = Signal()
     api_test_requested = Signal()

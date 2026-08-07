@@ -10,6 +10,8 @@ TranslationUpdates = dict[tuple[str, str], str]
 
 
 class TextExchangeService:
+    """TXT/JSON 人工翻译交换与本地重绘入口。"""
+
     def export_txt(self, metadata_paths: list[Path], output_path: Path) -> None:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)

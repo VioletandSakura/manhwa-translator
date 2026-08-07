@@ -23,6 +23,8 @@ TranslatorFactory = Callable[[ApiChannelRecord, str], Translator]
 
 
 class AsyncRateLimiter:
+    """滑动窗口限流器，配合 asyncio 信号量控制 API 并发。"""
+
     def __init__(
         self,
         limit: int,
@@ -52,6 +54,8 @@ class AsyncRateLimiter:
 
 
 class ChannelRouterTranslator:
+    """按优先级/轮询策略在多条已验证 API 通道间自动故障切换。"""
+
     def __init__(self, database: Database, credentials: CredentialStore, factory: TranslatorFactory) -> None:
         self.database = database
         self.credentials = credentials
@@ -63,6 +67,7 @@ class ChannelRouterTranslator:
         self._loop: asyncio.AbstractEventLoop | None = None
 
     async def translate(self, texts: list[str], source_language: str, target_language: str) -> list[str]:
+        """按通道顺序尝试翻译；全部失败时抛出聚合错误。"""
         loop = asyncio.get_running_loop()
         if self._loop is not loop:
             # httpx clients and asyncio primitives are bound to the event loop

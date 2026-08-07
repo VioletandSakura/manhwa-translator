@@ -11,6 +11,8 @@ from app.paths import AppPaths
 
 
 class PillowTextRenderer:
+    """用 Pillow 在擦字图上绘制翻译文本，支持横排/竖排与字号自适应。"""
+
     def __init__(self, *, font_path: Path | None = None, min_font_size: int = 10, max_font_size: int = 64, color: tuple[int, int, int] = (0, 0, 0), stroke_width: int = 0) -> None:
         self.font_path = font_path or self._find_font()
         self.min_font_size = min_font_size

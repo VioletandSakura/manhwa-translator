@@ -4,6 +4,8 @@ from app.storage.database import Database
 
 
 class CachedTranslator:
+    """翻译结果缓存：命中 SQLite 缓存时跳过 API 调用。"""
+
     def __init__(self, database: Database, delegate, *, provider: str, model: str) -> None:
         self.database = database
         self.delegate = delegate

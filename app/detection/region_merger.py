@@ -7,7 +7,7 @@ from app.domain.models import TextRegion
 
 
 def merge_text_regions(regions: list[TextRegion]) -> list[TextRegion]:
-    """Merge nearby same-direction boxes that likely belong to one bubble.
+    """合并属于同一气泡的相邻同向文本框。
 
     RapidOCR sometimes splits one speech bubble into several text boxes.
     Merging them keeps the whole sentence in one region so translation and

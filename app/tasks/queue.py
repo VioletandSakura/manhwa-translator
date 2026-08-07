@@ -20,6 +20,8 @@ QueueTaskCallback = Callable[[str], None]
 
 
 class PersistentTaskQueue:
+    """持久化任务队列：支持暂停、取消、恢复、失败重试与页面并发。"""
+
     def __init__(
         self,
         database: Database,
@@ -47,11 +49,13 @@ class PersistentTaskQueue:
         self._cancelled_tasks: set[str] = set()
 
     def pause(self, task_id: str) -> None:
+        """暂停任务，未完成页面保持可恢复状态。"""
         self._paused_tasks.add(task_id)
         self._event(task_id).clear()
         self.database.update_task_status(task_id, TaskStatus.PAUSED)
 
     def resume(self, task_id: str) -> bool:
+        """恢复已暂停任务；没有可恢复页面时返回 False。"""
         if not self.database.list_resumable_pages(task_id):
             self.database.repair_completed_task_statuses()
             return False
@@ -61,17 +65,20 @@ class PersistentTaskQueue:
         return True
 
     def cancel(self, task_id: str) -> None:
+        """取消任务并放行等待中的页面。"""
         self._cancelled_tasks.add(task_id)
         self._event(task_id).set()
         self.database.update_task_status(task_id, TaskStatus.CANCELLED)
 
     def retry_page(self, page_id: str) -> None:
+        """把单个失败页面重置为待处理并重跑任务。"""
         page = self.database.get_page(page_id)
         self.database.reset_page_for_retry(page_id)
         self._cancelled_tasks.discard(page.task_id)
         self.database.update_task_status(page.task_id, TaskStatus.PENDING)
 
     async def run(self, task_id: str) -> None:
+        """运行任务的全部可恢复页面，完成后关闭数据库连接。"""
         task = self.database.get_task(task_id)
         event = self._event(task_id)
         if task_id not in self._paused_tasks:

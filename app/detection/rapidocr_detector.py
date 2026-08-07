@@ -13,6 +13,8 @@ from .region_merger import merge_text_regions
 
 
 class RapidOCRDetector:
+    """基于 RapidOCR 的文本框检测器，检测后复用识别结果。"""
+
     """使用PP-OCR检测框，并缓存同次推理得到的识别文本。"""
 
     def __init__(self, ocr: RapidOCREngine) -> None:

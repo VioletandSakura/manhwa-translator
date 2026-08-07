@@ -16,11 +16,14 @@ def _now() -> str:
 
 
 class Database:
+    """SQLite 持久化层：每线程复用连接，WAL 模式，含任务与翻译缓存。"""
+
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self._local = threading.local()
 
     def connect(self) -> sqlite3.Connection:
+        """返回当前线程复用的 SQLite 连接。"""
         connection = getattr(self._local, "connection", None)
         if connection is None:
             connection = sqlite3.connect(self.path)
@@ -33,6 +36,7 @@ class Database:
         return connection
 
     def close(self) -> None:
+        """关闭当前线程持有的连接。"""
         connection = getattr(self._local, "connection", None)
         if connection is not None:
             connection.close()
@@ -45,6 +49,7 @@ class Database:
         return None
 
     def initialize(self) -> None:
+        """建表并应用轻量迁移（含页面任务状态索引）。"""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
             connection.executescript(
@@ -106,6 +111,8 @@ class Database:
                     updated_at TEXT NOT NULL,
                     UNIQUE(category, name)
                 );
+                CREATE INDEX IF NOT EXISTS idx_pages_task_status
+                    ON pages(task_id, status);
                 """
             )
             self._ensure_column(connection, "pages", "attempt_count", "INTEGER NOT NULL DEFAULT 0")

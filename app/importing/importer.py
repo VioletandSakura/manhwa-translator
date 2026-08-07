@@ -33,6 +33,8 @@ class ImportedBatch:
 
 
 class InputImporter:
+    """导入图片、文件夹、ZIP/CBZ 与 EPUB，并防御路径穿越和压缩炸弹。"""
+
     def __init__(
         self,
         workspace_root: Path,
@@ -47,6 +49,7 @@ class InputImporter:
         self.max_compression_ratio = max_compression_ratio
 
     def import_sources(self, sources: list[Path]) -> ImportedBatch:
+        """按自然顺序导入全部输入，返回页面批次与临时工作区。"""
         if not sources:
             raise ValueError("请选择至少一个输入文件或文件夹")
         imported: list[tuple[Path, str, dict[str, object]]] = []
@@ -62,7 +65,7 @@ class InputImporter:
             suffix = source.suffix.lower()
             if suffix in IMAGE_EXTENSIONS:
                 imported.append((source, source.parent.name, {"input_type": "image"}))
-            elif suffix == ".zip":
+            elif suffix in {".zip", ".cbz"}:
                 workspace = workspace or self._new_workspace()
                 imported.extend(self._import_zip(source, workspace))
             elif suffix == ".epub":
@@ -108,6 +111,7 @@ class InputImporter:
         return validated
 
     def _import_zip(self, source: Path, workspace: Path) -> list[tuple[Path, str, dict[str, object]]]:
+        """解压 ZIP/CBZ 中的图片，保持自然排序。"""
         destination = workspace / source.stem
         destination.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(source) as archive:
@@ -126,6 +130,7 @@ class InputImporter:
             ]
 
     def _import_epub(self, source: Path, workspace: Path) -> list[tuple[Path, str, dict[str, object]]]:
+        """按 EPUB Spine 顺序导入页面图片。"""
         destination = workspace / source.stem
         destination.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(source) as archive:
@@ -135,16 +140,9 @@ class InputImporter:
             if not rootfile:
                 raise ValueError("EPUB缺少OPF入口")
             opf_name = _safe_member_name(unquote(rootfile))
-            opf = self._parse_xml(self._read_member(archive, members, opf_name), "OPF")
-            opf_dir = PurePosixPath(opf_name).parent
-            manifest = {
-                item.attrib["id"]: (item.attrib.get("href", ""), item.attrib.get("media-type", ""))
-                for item in opf.iter()
-                if _local_name(item.tag) == "item" and item.attrib.get("id")
-            }
+            opf_dir, manifest, spine_items = self._epub_manifest(archive, members, opf_name)
             ordered: list[tuple[str, str, int]] = []
             seen: set[str] = set()
-            spine_items = [item.attrib.get("idref", "") for item in opf.iter() if _local_name(item.tag) == "itemref"]
             for spine_index, item_id in enumerate(spine_items):
                 href, media_type = manifest.get(item_id, ("", ""))
                 member_name = _resolve_member(opf_dir, href)
@@ -153,15 +151,8 @@ class InputImporter:
                     continue
                 if member_name not in members or "html" not in media_type:
                     continue
-                document = self._parse_xml(archive.read(members[member_name]), member_name)
-                document_dir = PurePosixPath(member_name).parent
-                for element in document.iter():
-                    if _local_name(element.tag) not in {"img", "image"}:
-                        continue
-                    href_value = element.attrib.get("src") or element.attrib.get("href") or element.attrib.get("{http://www.w3.org/1999/xlink}href")
-                    if href_value:
-                        image_name = _resolve_member(document_dir, href_value)
-                        self._append_epub_page(ordered, seen, image_name, PurePosixPath(member_name).stem, spine_index)
+                for image_name in self._html_image_members(archive, members, member_name):
+                    self._append_epub_page(ordered, seen, image_name, PurePosixPath(member_name).stem, spine_index)
             for item_id, (href, media_type) in manifest.items():
                 member_name = _resolve_member(opf_dir, href)
                 if _is_image(member_name, media_type):
@@ -193,10 +184,55 @@ class InputImporter:
         chapter: str,
         spine_index: int,
     ) -> None:
+        """按去重规则追加一个 EPUB 页面。"""
         if PurePosixPath(member_name).suffix.lower() not in IMAGE_EXTENSIONS or member_name in seen:
             return
         seen.add(member_name)
         ordered.append((member_name, chapter, spine_index))
+
+    @classmethod
+    def _epub_manifest(
+        cls,
+        archive: zipfile.ZipFile,
+        members: dict[str, zipfile.ZipInfo],
+        opf_name: str,
+    ) -> tuple[PurePosixPath, dict[str, tuple[str, str]], list[str]]:
+        """解析 OPF 清单与 Spine 顺序。"""
+        opf = cls._parse_xml(cls._read_member(archive, members, opf_name), "OPF")
+        opf_dir = PurePosixPath(opf_name).parent
+        manifest = {
+            item.attrib["id"]: (item.attrib.get("href", ""), item.attrib.get("media-type", ""))
+            for item in opf.iter()
+            if _local_name(item.tag) == "item" and item.attrib.get("id")
+        }
+        spine_items = [
+            item.attrib.get("idref", "")
+            for item in opf.iter()
+            if _local_name(item.tag) == "itemref"
+        ]
+        return opf_dir, manifest, spine_items
+
+    @staticmethod
+    def _html_image_members(
+        archive: zipfile.ZipFile,
+        members: dict[str, zipfile.ZipInfo],
+        member_name: str,
+    ) -> list[str]:
+        """收集 HTML 文档里引用的图片成员名。"""
+        document = InputImporter._parse_xml(archive.read(members[member_name]), member_name)
+        document_dir = PurePosixPath(member_name).parent
+        images: list[str] = []
+        for element in document.iter():
+            if _local_name(element.tag) not in {"img", "image"}:
+                continue
+            href_value = (
+                element.attrib.get("src")
+                or element.attrib.get("href")
+                or element.attrib.get("{http://www.w3.org/1999/xlink}href")
+            )
+            if href_value:
+                images.append(_resolve_member(document_dir, href_value))
+        return images
 
     @staticmethod
     def _read_member(archive: zipfile.ZipFile, members: dict[str, zipfile.ZipInfo], name: str) -> bytes:

@@ -41,6 +41,19 @@ def test_zip_import_extracts_images_in_natural_order(tmp_path: Path) -> None:
     assert [page.source_path.read_bytes() for page in result.pages] == [b"two", b"ten"]
 
 
+def test_cbz_import_is_treated_as_zip_archive(tmp_path: Path) -> None:
+    archive = tmp_path / "chapter.cbz"
+    with zipfile.ZipFile(archive, "w") as book:
+        book.writestr("pages/1.png", b"one")
+        book.writestr("pages/2.png", b"two")
+        book.writestr("readme.txt", b"ignored")
+
+    result = InputImporter(tmp_path / "imports").import_sources([archive])
+
+    assert [page.original_name for page in result.pages] == ["1.png", "2.png"]
+    assert [page.source_path.read_bytes() for page in result.pages] == [b"one", b"two"]
+
+
 def test_zip_import_rejects_path_traversal_before_extracting(tmp_path: Path) -> None:
     archive = tmp_path / "unsafe.zip"
     with zipfile.ZipFile(archive, "w") as book:

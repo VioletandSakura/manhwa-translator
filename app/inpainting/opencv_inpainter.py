@@ -7,6 +7,8 @@ from app.domain.models import TextRegion
 
 
 class OpenCVInpainter:
+    """OpenCV 局部擦字实现。"""
+
     def __init__(self, *, dilation: int = 5, radius: int = 5) -> None:
         self.dilation = max(0, dilation)
         self.radius = max(1, radius)
@@ -21,4 +23,3 @@ class OpenCVInpainter:
             size = self.dilation * 2 + 1
             mask = cv2.dilate(mask, np.ones((size, size), np.uint8), iterations=1)
         return cv2.inpaint(image, mask, self.radius, cv2.INPAINT_TELEA)
-

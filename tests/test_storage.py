@@ -48,6 +48,16 @@ def test_database_repairs_running_task_when_all_pages_are_completed(tmp_path: Pa
     assert database.get_task(task_id).status is TaskStatus.COMPLETED
 
 
+def test_database_creates_page_task_status_index(tmp_path: Path) -> None:
+    database = Database(tmp_path / "app.db")
+    database.initialize()
+
+    with database.connect() as connection:
+        indexes = {row["name"] for row in connection.execute("PRAGMA index_list('pages')")}
+
+    assert "idx_pages_task_status" in indexes
+
+
 def test_translation_cache_uses_provider_model_and_languages(tmp_path: Path) -> None:
     database = Database(tmp_path / "app.db")
     database.initialize()

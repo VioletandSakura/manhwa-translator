@@ -12,12 +12,15 @@ from app.security.redaction import redact_text
 
 @dataclass(frozen=True, slots=True)
 class OpenAICompatibleConfig:
+    """OpenAI 兼容服务的连接配置。"""
+
     service_name: str
     api_key: str
     base_url: str
     model: str
     timeout_seconds: float = 60.0
     retries: int = 2
+    max_texts_per_request: int = 80
 
     @classmethod
     def deepseek(cls, api_key: str) -> "OpenAICompatibleConfig":
@@ -30,10 +33,14 @@ class OpenAICompatibleConfig:
 
 
 class TranslationServiceError(RuntimeError):
+    """翻译服务调用失败，消息已经过敏感信息脱敏。"""
+
     pass
 
 
 class OpenAICompatibleTranslator:
+    """调用 OpenAI 兼容聊天接口批量翻译，带限流退避与 JSON 解析。"""
+
     def __init__(
         self,
         config: OpenAICompatibleConfig,
@@ -45,10 +52,12 @@ class OpenAICompatibleTranslator:
         self._client = client or httpx.AsyncClient(timeout=config.timeout_seconds)
 
     async def close(self) -> None:
+        """关闭自建 HTTP 客户端。"""
         if self._owns_client:
             await self._client.aclose()
 
     async def test_connection(self) -> str:
+        """校验模型可用性，只读取模型列表，不消耗翻译额度。"""
         available_models = await self.list_models()
         if self.config.model not in available_models:
             available = "、".join(available_models[:8]) or "未返回可用模型"
@@ -58,6 +67,7 @@ class OpenAICompatibleTranslator:
         return self.config.model
 
     async def list_models(self) -> list[str]:
+        """获取服务端可用模型列表。"""
         url = f"{self.config.base_url.rstrip('/')}/models"
         timeout_seconds = min(max(float(self.config.timeout_seconds), 5.0), 15.0)
         try:
@@ -95,6 +105,38 @@ class OpenAICompatibleTranslator:
     ) -> list[str]:
         if not texts:
             return []
+        limit = max(1, self.config.max_texts_per_request)
+        if len(texts) > limit:
+            translations: list[str] = []
+            for start in range(0, len(texts), limit):
+                chunk = texts[start : start + limit]
+                translations.extend(
+                    await self._translate_once(
+                        chunk,
+                        source_language,
+                        target_language,
+                        system_prompt=system_prompt,
+                        context=context,
+                    )
+                )
+            return translations
+        return await self._translate_once(
+            texts,
+            source_language,
+            target_language,
+            system_prompt=system_prompt,
+            context=context,
+        )
+
+    async def _translate_once(
+        self,
+        texts: list[str],
+        source_language: str,
+        target_language: str,
+        *,
+        system_prompt: str,
+        context: list[str] | None,
+    ) -> list[str]:
         payload = self._build_payload(texts, source_language, target_language, system_prompt, context)
         response = await self._request(payload)
         try:

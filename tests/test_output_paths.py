@@ -15,6 +15,10 @@ def test_single_image_can_keep_legacy_output_root(tmp_path: Path) -> None:
     assert resolve_batch_output(tmp_path, "", require_name=False) == tmp_path
 
 
+def test_cbz_archive_requires_batch_name(tmp_path: Path) -> None:
+    assert batch_requires_name([tmp_path / "book.cbz"]) is True
+
+
 @pytest.mark.parametrize(
     "name",
     ["", "  ", ".", "..", "../escape", r"..\escape", "a/b", r"a\b", "bad:name", "bad*name"],

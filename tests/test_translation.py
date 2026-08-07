@@ -336,3 +336,41 @@ def test_translation_retries_network_errors_with_backoff(monkeypatch) -> None:
     assert attempts == 3
     assert delays == [0.5, 1.0]
     asyncio.run(client.aclose())
+
+
+def test_translation_splits_large_text_batches() -> None:
+    received: list[list[str]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        request_data = json.loads(payload["messages"][1]["content"])
+        texts = list(request_data["texts"])
+        received.append(texts)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": json.dumps({"translations": texts})}}
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    translator = OpenAICompatibleTranslator(
+        OpenAICompatibleConfig(
+            service_name="DeepSeek",
+            api_key="secret-key",
+            base_url="https://api.deepseek.com/v1",
+            model="deepseek-v4-flash",
+            max_texts_per_request=2,
+        ),
+        client=client,
+    )
+
+    result = asyncio.run(
+        translator.translate(["a", "b", "c", "d"], "auto", "zh-Hans")
+    )
+
+    assert result == ["a", "b", "c", "d"]
+    assert received == [["a", "b"], ["c", "d"]]
+    asyncio.run(client.aclose())
