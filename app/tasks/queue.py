@@ -26,6 +26,8 @@ class PersistentTaskQueue:
         processor: PageProcessor,
         *,
         max_concurrent_pages: int = 1,
+        max_page_attempts: int = 1,
+        page_retry_delay_seconds: float = 1.0,
         on_task_completed: QueueTaskCallback | None = None,
         on_page_completed: QueueEventCallback | None = None,
         on_page_failed: QueueEventCallback | None = None,
@@ -34,6 +36,8 @@ class PersistentTaskQueue:
         self.database = database
         self.processor = processor
         self.max_concurrent_pages = max(1, max_concurrent_pages)
+        self.max_page_attempts = max(1, max_page_attempts)
+        self.page_retry_delay_seconds = max(0.0, page_retry_delay_seconds)
         self.on_task_completed = on_task_completed
         self.on_page_completed = on_page_completed
         self.on_page_failed = on_page_failed
@@ -99,18 +103,28 @@ class PersistentTaskQueue:
                 page.id, PageStatus.CANCELLED, stage="已取消", progress=page.progress
             )
             return
-        self.database.increment_page_attempt(page.id)
-        self.database.update_page_status(page.id, PageStatus.RUNNING, stage="准备", progress=0)
+        last_error: Exception | None = None
+        result = None
+        for attempt in range(self.max_page_attempts):
+            self.database.increment_page_attempt(page.id)
+            stage = "准备" if attempt == 0 else f"自动重试 {attempt}"
+            self.database.update_page_status(page.id, PageStatus.RUNNING, stage=stage, progress=0)
 
-        def record_progress(stage: str, progress: int, *, page_id: str = page.id) -> None:
-            self.database.update_page_status(page_id, PageStatus.RUNNING, stage=stage, progress=progress)
-            if self.on_page_progress is not None:
-                self.on_page_progress(task_id, self.database.get_page(page_id), stage, progress)
+            def record_progress(stage: str, progress: int, *, page_id: str = page.id) -> None:
+                self.database.update_page_status(page_id, PageStatus.RUNNING, stage=stage, progress=progress)
+                if self.on_page_progress is not None:
+                    self.on_page_progress(task_id, self.database.get_page(page_id), stage, progress)
 
-        try:
-            result = await self.processor(page, Path(task.output_dir), record_progress)
-        except Exception as error:
-            message = redact_text(str(error))
+            try:
+                result = await self.processor(page, Path(task.output_dir), record_progress)
+                last_error = None
+                break
+            except Exception as error:
+                last_error = error
+                if attempt + 1 < self.max_page_attempts:
+                    await asyncio.sleep(self._page_retry_delay(attempt))
+        if last_error is not None:
+            message = redact_text(str(last_error))
             self.database.update_page_status(
                 page.id, PageStatus.FAILED, stage="失败", progress=0, error=message
             )
@@ -122,6 +136,9 @@ class PersistentTaskQueue:
         self.database.update_page_status(page.id, PageStatus.COMPLETED, stage="保存", progress=100)
         if self.on_page_completed is not None:
             self.on_page_completed(task_id, self.database.get_page(page.id))
+
+    def _page_retry_delay(self, attempt: int) -> float:
+        return min(30.0, self.page_retry_delay_seconds * (2**attempt))
 
     def _finish_task(self, task_id: str) -> None:
         pages = self.database.list_task_pages(task_id)

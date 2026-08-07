@@ -185,3 +185,154 @@ def test_translation_maps_common_http_errors(status: int, message: str) -> None:
 
     with pytest.raises(TranslationServiceError, match=message):
         OpenAICompatibleTranslator._raise_for_status(response)
+
+
+def test_translation_retries_rate_limit_then_succeeds(monkeypatch) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    monkeypatch.setattr("app.translation.openai_compatible.asyncio.sleep", fake_sleep)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(429, json={"error": {"message": "rate limited"}})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps({"translations": ["你好"]})}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    translator = OpenAICompatibleTranslator(
+        OpenAICompatibleConfig(
+            service_name="DeepSeek",
+            api_key="secret-key",
+            base_url="https://api.deepseek.com/v1",
+            model="deepseek-v4-flash",
+            retries=2,
+        ),
+        client=client,
+    )
+
+    result = asyncio.run(translator.translate(["こんにちは"], "auto", "zh-Hans"))
+
+    assert result == ["你好"]
+    assert attempts == 2
+    assert delays == [0.5]
+    asyncio.run(client.aclose())
+
+
+def test_translation_honors_retry_after_header(monkeypatch) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    monkeypatch.setattr("app.translation.openai_compatible.asyncio.sleep", fake_sleep)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(503, headers={"Retry-After": "2"})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps({"translations": ["你好"]})}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    translator = OpenAICompatibleTranslator(
+        OpenAICompatibleConfig(
+            service_name="DeepSeek",
+            api_key="secret-key",
+            base_url="https://api.deepseek.com/v1",
+            model="deepseek-v4-flash",
+            retries=1,
+        ),
+        client=client,
+    )
+
+    result = asyncio.run(translator.translate(["こんにちは"], "auto", "zh-Hans"))
+
+    assert result == ["你好"]
+    assert attempts == 2
+    assert delays == [2.0]
+    asyncio.run(client.aclose())
+
+
+def test_translation_gives_up_after_retrying_server_errors(monkeypatch) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    monkeypatch.setattr("app.translation.openai_compatible.asyncio.sleep", fake_sleep)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(500, json={"error": {"message": "boom"}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    translator = OpenAICompatibleTranslator(
+        OpenAICompatibleConfig(
+            service_name="DeepSeek",
+            api_key="secret-key",
+            base_url="https://api.deepseek.com/v1",
+            model="deepseek-v4-flash",
+            retries=2,
+        ),
+        client=client,
+    )
+
+    with pytest.raises(TranslationServiceError, match="暂时不可用"):
+        asyncio.run(translator.translate(["test"], "auto", "zh-Hans"))
+
+    assert attempts == 3
+    assert delays == [0.5, 1.0]
+    asyncio.run(client.aclose())
+
+
+def test_translation_retries_network_errors_with_backoff(monkeypatch) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    monkeypatch.setattr("app.translation.openai_compatible.asyncio.sleep", fake_sleep)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 2:
+            raise httpx.ConnectError("boom", request=request)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps({"translations": ["你好"]})}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    translator = OpenAICompatibleTranslator(
+        OpenAICompatibleConfig(
+            service_name="DeepSeek",
+            api_key="secret-key",
+            base_url="https://api.deepseek.com/v1",
+            model="deepseek-v4-flash",
+            retries=2,
+        ),
+        client=client,
+    )
+
+    result = asyncio.run(translator.translate(["こんにちは"], "auto", "zh-Hans"))
+
+    assert result == ["你好"]
+    assert attempts == 3
+    assert delays == [0.5, 1.0]
+    asyncio.run(client.aclose())

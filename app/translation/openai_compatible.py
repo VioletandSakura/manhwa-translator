@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -146,6 +147,11 @@ class OpenAICompatibleTranslator:
                 response = await self._client.post(url, headers=headers, json=payload)
                 if response.is_success:
                     return response
+                if response.status_code == 429 or response.status_code >= 500:
+                    if attempt < self.config.retries:
+                        await asyncio.sleep(self._retry_delay(response, attempt))
+                        continue
+                    self._raise_for_status(response)
                 self._raise_for_status(response)
             except TranslationServiceError:
                 raise
@@ -153,7 +159,22 @@ class OpenAICompatibleTranslator:
                 last_error = error
                 if attempt >= self.config.retries:
                     raise TranslationServiceError("无法连接翻译服务，请检查网络、Base URL和超时设置") from error
+                await asyncio.sleep(self._backoff_seconds(attempt))
         raise TranslationServiceError(redact_text(str(last_error or "翻译请求失败")))
+
+    @classmethod
+    def _retry_delay(cls, response: httpx.Response, attempt: int) -> float:
+        retry_after = response.headers.get("Retry-After")
+        if retry_after is not None:
+            try:
+                return min(30.0, max(0.0, float(retry_after)))
+            except ValueError:
+                pass
+        return cls._backoff_seconds(attempt)
+
+    @staticmethod
+    def _backoff_seconds(attempt: int) -> float:
+        return min(8.0, 0.5 * (2**attempt))
 
     @staticmethod
     def _raise_for_status(response: httpx.Response) -> None:

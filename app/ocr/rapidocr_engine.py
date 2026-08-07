@@ -25,12 +25,14 @@ class RapidOCREngine:
         refine_threshold: float = 0.65,
         det_limit_side_len: int | None = None,
         max_side_len: int | None = None,
+        crop_padding: int | None = None,
     ) -> None:
         self._engine = engine
         self._inference_lock = threading.Lock()
         self.refine_threshold = refine_threshold
         self.det_limit_side_len = det_limit_side_len
         self.max_side_len = max_side_len
+        self.crop_padding = crop_padding
 
     def _get_engine(self) -> Any:
         if self._engine is not None:
@@ -73,9 +75,9 @@ class RapidOCREngine:
                 if region.confidence < self.refine_threshold:
                     refinable.append(region)
                 continue
-            left, top, right, bottom = region.bounds
-            left, top = max(0, left), max(0, top)
-            right, bottom = min(width, right), min(height, bottom)
+            left, top, right, bottom = self._padded_bounds(
+                region.bounds, (height, width)
+            )
             crop = image[top:bottom, left:right]
             if crop.size == 0:
                 region.needs_review = True
@@ -88,6 +90,27 @@ class RapidOCREngine:
                 region.source_text = text
                 region.confidence = confidence
         return regions
+
+    def _padded_bounds(
+        self,
+        bounds: tuple[int, int, int, int],
+        image_size: tuple[int, int],
+    ) -> tuple[int, int, int, int]:
+        """Expand a region crop by a small margin so text touching the box
+        edges is not cut off, which commonly causes missing characters."""
+        height, width = image_size
+        left, top, right, bottom = bounds
+        box_height = bottom - top
+        box_width = right - left
+        padding = self.crop_padding
+        if padding is None:
+            padding = min(14, max(2, round(0.06 * min(box_height, box_width))))
+        return (
+            max(0, left - padding),
+            max(0, top - padding),
+            min(width, right + padding),
+            min(height, bottom + padding),
+        )
 
     def infer(self, image: np.ndarray) -> Any:
         with self._inference_lock:

@@ -400,6 +400,7 @@ class TranslationApplication:
         inpainting_engine: str = "opencv",
         high_accuracy_ocr: bool = False,
         max_concurrent_pages: int = 1,
+        max_page_attempts: int = 3,
         on_task_completed=None,
         on_page_completed=None,
         on_page_failed=None,
@@ -421,6 +422,7 @@ class TranslationApplication:
             self.database,
             process,
             max_concurrent_pages=max_concurrent_pages,
+            max_page_attempts=max_page_attempts,
             on_task_completed=(
                 on_task_completed
                 if on_task_completed is not None

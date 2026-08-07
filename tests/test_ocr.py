@@ -92,6 +92,44 @@ def test_rapidocr_recognition_runs_in_worker_thread() -> None:
     assert observed[0] != threading.main_thread().name
 
 
+def test_rapidocr_pads_recognition_crop() -> None:
+    captured: list[np.ndarray] = []
+
+    def engine(crop):
+        captured.append(crop)
+        return SimpleNamespace(txts=["ok"], scores=[0.9])
+
+    ocr = RapidOCREngine(engine, crop_padding=5)
+    region = TextRegion(
+        id="padded",
+        polygon=[(20, 20), (60, 20), (60, 60), (20, 60)],
+    )
+
+    asyncio.run(ocr.recognize(np.zeros((100, 100, 3), dtype=np.uint8), [region]))
+
+    assert len(captured) == 1
+    assert captured[0].shape[:2] == (50, 50)
+
+
+def test_rapidocr_auto_padding_is_clipped_to_image() -> None:
+    captured: list[np.ndarray] = []
+
+    def engine(crop):
+        captured.append(crop)
+        return SimpleNamespace(txts=["ok"], scores=[0.9])
+
+    ocr = RapidOCREngine(engine)
+    region = TextRegion(
+        id="edge",
+        polygon=[(0, 0), (60, 0), (60, 60), (0, 60)],
+    )
+
+    asyncio.run(ocr.recognize(np.zeros((70, 70, 3), dtype=np.uint8), [region]))
+
+    assert len(captured) == 1
+    assert captured[0].shape[:2] == (64, 64)
+
+
 class _RefineEngine:
     def __init__(self, text: str, confidence: float) -> None:
         self.text = text

@@ -155,3 +155,66 @@ def test_queue_invokes_task_completed_callback(tmp_path: Path) -> None:
     asyncio.run(queue.run(task_id))
 
     assert calls == [task_id]
+
+
+def test_queue_auto_retries_transient_page_failure(tmp_path: Path) -> None:
+    database = Database(tmp_path / "app.db")
+    database.initialize()
+    task_id, page_ids = _task_with_pages(database, 1)
+    calls = 0
+    completed: list[str] = []
+    failed: list[str] = []
+
+    async def process(page, _output_dir, on_progress):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise RuntimeError("transient failure")
+        on_progress("OCR", 30)
+        return f"result-{page.id}"
+
+    queue = PersistentTaskQueue(
+        database,
+        process,
+        max_page_attempts=3,
+        page_retry_delay_seconds=0,
+        on_page_completed=lambda _task_id, page: completed.append(page.id),
+        on_page_failed=lambda _task_id, page: failed.append(page.id),
+    )
+    asyncio.run(queue.run(task_id))
+
+    page = database.get_page(page_ids[0])
+    assert page.status is PageStatus.COMPLETED
+    assert page.attempt_count == 3
+    assert database.get_task(task_id).status is TaskStatus.COMPLETED
+    assert completed == [page_ids[0]]
+    assert failed == []
+
+
+def test_queue_gives_up_after_max_page_attempts(tmp_path: Path) -> None:
+    database = Database(tmp_path / "app.db")
+    database.initialize()
+    task_id, page_ids = _task_with_pages(database, 1)
+    calls = 0
+    failed: list[str] = []
+
+    async def process(page, _output_dir, on_progress):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("always fails")
+
+    queue = PersistentTaskQueue(
+        database,
+        process,
+        max_page_attempts=2,
+        page_retry_delay_seconds=0,
+        on_page_failed=lambda _task_id, page: failed.append(page.id),
+    )
+    asyncio.run(queue.run(task_id))
+
+    page = database.get_page(page_ids[0])
+    assert page.status is PageStatus.FAILED
+    assert page.attempt_count == 2
+    assert "always fails" in (page.error or "")
+    assert database.get_task(task_id).status is TaskStatus.FAILED
+    assert failed == [page_ids[0]]
