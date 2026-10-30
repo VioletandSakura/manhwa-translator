@@ -610,14 +610,13 @@ class TranslationApplication:
         page_id = self.database.add_page(task_id, 0, str(source_path))
         self.database.update_task_status(task_id, TaskStatus.RUNNING)
         self.database.update_page_status(page_id, PageStatus.RUNNING, stage="准备", progress=0)
-        active_pipeline = pipeline or self.build_pipeline(translate=options.translate, **options.render_settings())
-
         def record_progress(stage: str, progress: int) -> None:
             self.database.update_page_status(page_id, PageStatus.RUNNING, stage=stage, progress=progress)
             if on_progress is not None:
                 on_progress(stage, progress)
 
         try:
+            active_pipeline = pipeline or self.build_pipeline(translate=options.translate, **options.render_settings())
             result = await active_pipeline.process(
                 source_path,
                 output_dir,
@@ -630,6 +629,7 @@ class TranslationApplication:
             self.database.update_task_status(task_id, TaskStatus.FAILED)
             self.logger.error(message)
             raise
+        self.database.set_page_result(page_id, str(result.artifacts.translated))
         self.database.update_page_status(page_id, PageStatus.COMPLETED, stage="保存", progress=100)
         self.database.update_task_status(task_id, TaskStatus.COMPLETED)
         self.archive_originals(task_id)
