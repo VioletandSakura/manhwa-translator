@@ -1,5 +1,7 @@
 # GitHub 核对记录
 
+以下为2026-10-27的历史核对。`0.1.0-alpha.1` 发布后的版本与可见性请以 [Releases](https://github.com/VioletandSakura/manhwa-translator/releases)和[首版验收](RELEASE_2026-10-31.md)为准。
+
 核对日期：2026-10-27（澳门时间）。通过已连接的 GitHub 账号读取仓库元数据、分支、README、文件树和提交比较；本次没有向 GitHub 写入。
 
 仓库：[VioletandSakura/manhwa-translator](https://github.com/VioletandSakura/manhwa-translator)。本地 `origin` 指向该仓库，已连接账号也是 `VioletandSakura`。当前仓库为 **private**，默认分支为 `main`。

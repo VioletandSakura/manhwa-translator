@@ -55,6 +55,7 @@ def model_manifest() -> dict:
 async def acceptance(output: Path) -> dict:
     import cv2
     import numpy as np
+    from PySide6.QtGui import QFontDatabase
     from PySide6.QtWidgets import QApplication
     from app.domain.enums import PageStatus, TaskStatus
     from app.paths import AppPaths
@@ -95,17 +96,23 @@ async def acceptance(output: Path) -> dict:
         with zipfile.ZipFile(archive_path) as archive:
             assert archive.testzip() is None and any(name.endswith('.png') for name in archive.namelist())
         qt_app = QApplication.instance() or QApplication([])
-        window = MainWindow()
+        # The offscreen QPA does not enumerate Windows fonts automatically.
+        # Use the OS font when present; never bundle/copy a user's font file.
+        cjk_font = Path(os.environ.get('WINDIR', 'C:/Windows')) / 'Fonts/msyh.ttc'
+        cjk_font_loaded = cjk_font.is_file() and QFontDatabase.addApplicationFont(str(cjk_font)) >= 0
+        window = MainWindow(paths)
         window.resize(1366, 768)
         window.show()
         qt_app.processEvents()
         assert window.tabs.count() == 11
         assert window.grab().save(str(output / 'window.png'))
+        window._allow_quit = True
         window.close()
         qt_app.processEvents()
         return {'passed': True, 'real_ocr_texts': texts, 'ocr_seconds': ocr_seconds,
                 'manually_supplied_test_translation': 'GOOD MORNING', 'pages': 1,
                 'network_blocked': True, 'translation_api_calls': 0, 'system_credentials_used': False,
+                'offscreen_cjk_system_font_loaded': cjk_font_loaded,
                 'checks': ['real OCR', 'SQLite completed checkpoint', 'OCR-only preserves original pixels',
                            'TXT/JSON export', 'manual text edit', 'OpenCV erase + Pillow redraw',
                            'translated ZIP CRC', '11-page Qt window screenshot']}
