@@ -1,0 +1,11 @@
+name: 改进建议
+description: 描述你在处理漫画时遇到的具体困难
+title: "[建议] "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你希望解决什么问题
+      description: 请说明实际场景、当前做法和理想结果。
+    validations:
+      required: true

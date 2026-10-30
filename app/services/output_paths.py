@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tempfile
 from pathlib import Path
 
 
@@ -29,7 +30,7 @@ def resolve_batch_output(output_root: Path, batch_name: str, *, require_name: bo
     name = batch_name.strip()
     if not name:
         if require_name:
-            raise ValueError("多图、文件夹、ZIP 或 EPUB 任务必须填写批次名称。")
+            raise ValueError("多图、文件夹、ZIP、CBZ 或 EPUB 任务必须填写批次名称。")
         return root
     if len(name) > 120:
         raise ValueError("批次名称不能超过 120 个字符。")
@@ -48,3 +49,16 @@ def resolve_batch_output(output_root: Path, batch_name: str, *, require_name: bo
         if not candidate.is_dir() or any(candidate.iterdir()):
             raise ValueError(f"批次目录“{name}”已经存在且不为空，请换一个名称。")
     return root / name
+
+
+def ensure_output_writable(output_dir: Path) -> None:
+    """Check real write access once, before starting OCR or a paid API call."""
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryFile(dir=output_dir, prefix=".manga-write-check-"):
+            pass
+    except OSError as error:
+        raise ValueError(
+            f"无法写入输出目录：{output_dir}\n"
+            "请选择当前账号有写入权限的文件夹，再开始处理。"
+        ) from error

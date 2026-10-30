@@ -210,12 +210,23 @@ class Database:
             connection.commit()
 
     def create_task(self, source_path: str, output_dir: str) -> str:
+        return self.create_task_with_pages(source_path, output_dir, [])
+
+    def create_task_with_pages(self, source_path: str, output_dir: str,
+                               pages: list[tuple[int, str]]) -> str:
+        """Create the task and its page records in one all-or-nothing transaction."""
         task_id = uuid.uuid4().hex
         timestamp = _now()
         with self.connect() as connection:
             connection.execute(
                 "INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?)",
                 (task_id, source_path, output_dir, TaskStatus.PENDING.value, timestamp, timestamp),
+            )
+            connection.executemany(
+                """INSERT INTO pages
+                (id, task_id, page_index, source_path, status, stage, progress)
+                VALUES (?, ?, ?, ?, ?, '', 0)""",
+                [(uuid.uuid4().hex, task_id, index, path, PageStatus.PENDING.value) for index, path in pages],
             )
             connection.commit()
         return task_id
@@ -279,6 +290,40 @@ class Database:
             )
             connection.commit()
 
+    def recover_interrupted_tasks(self) -> int:
+        """启动时恢复上次进程留下的运行状态，保留已经完成的页。"""
+        with self.connect() as connection:
+            task_ids = [row[0] for row in connection.execute(
+                "SELECT id FROM tasks WHERE status = ? UNION SELECT task_id FROM pages WHERE status = ?",
+                (TaskStatus.RUNNING.value, PageStatus.RUNNING.value),
+            )]
+            connection.execute(
+                "UPDATE pages SET status = ?, stage = ?, progress = 0, error = NULL WHERE status = ?",
+                (PageStatus.PENDING.value, "上次中断，等待恢复", PageStatus.RUNNING.value),
+            )
+            connection.executemany(
+                "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+                [(TaskStatus.PAUSED.value, _now(), task_id) for task_id in task_ids],
+            )
+        self.repair_completed_task_statuses()
+        return len(task_ids)
+
+    def reset_cancelled_pages(self, task_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE pages SET status = ?, stage = '', progress = 0, error = NULL WHERE task_id = ? AND status = ?",
+                (PageStatus.PENDING.value, task_id, PageStatus.CANCELLED.value),
+            )
+
+    def task_page_counts(self) -> dict[str, dict[str, int]]:
+        rows = self.connect().execute(
+            "SELECT task_id, status, COUNT(*) AS n FROM pages GROUP BY task_id, status"
+        ).fetchall()
+        counts: dict[str, dict[str, int]] = {}
+        for row in rows:
+            counts.setdefault(row["task_id"], {})[row["status"]] = row["n"]
+        return counts
+
     def increment_page_attempt(self, page_id: str) -> None:
         with self.connect() as connection:
             connection.execute("UPDATE pages SET attempt_count = attempt_count + 1 WHERE id = ?", (page_id,))
@@ -311,10 +356,10 @@ class Database:
             updated_at=row["updated_at"],
         )
 
-    def list_tasks(self, limit: int = 200) -> list[TaskRecord]:
+    def list_tasks(self, limit: int | None = 200) -> list[TaskRecord]:
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (max(1, limit),)
+                "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (-1 if limit is None else max(1, limit),)
             ).fetchall()
         return [
             TaskRecord(

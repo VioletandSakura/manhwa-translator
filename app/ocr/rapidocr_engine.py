@@ -3,12 +3,16 @@ from __future__ import annotations
 import asyncio
 import threading
 from difflib import SequenceMatcher
+from itertools import islice
+from collections.abc import Iterator
 from typing import Any
 
 import cv2
 import numpy as np
 
 from app.domain.models import TextRegion
+
+_CONFIG_UNSET = object()
 
 
 class RapidOCRUnavailableError(RuntimeError):
@@ -26,15 +30,32 @@ class RapidOCREngine:
         det_limit_side_len: int | None = None,
         max_side_len: int | None = None,
         crop_padding: int | None = None,
+        refine_candidate_budget: int = 6,
+        refine_early_stop_confidence: float | None = 0.98,
+        refine_stable_results: int = 2,
     ) -> None:
         self._engine = engine
-        self._inference_lock = threading.Lock()
+        self._inference_lock = threading.RLock()
+        self._default_detection_config: tuple[Any, Any] | None = None
         self.refine_threshold = refine_threshold
         self.det_limit_side_len = det_limit_side_len
         self.max_side_len = max_side_len
         self.crop_padding = crop_padding
+        if not 0 <= refine_candidate_budget <= 6:
+            raise ValueError("复识别候选预算必须在0到6之间")
+        if refine_early_stop_confidence is not None and not 0 <= refine_early_stop_confidence <= 1:
+            raise ValueError("复识别提前停止置信度必须在0到1之间")
+        if refine_stable_results < 2:
+            raise ValueError("提前停止至少需要两次一致结果")
+        self.refine_candidate_budget = refine_candidate_budget
+        self.refine_early_stop_confidence = refine_early_stop_confidence
+        self.refine_stable_results = refine_stable_results
 
     def _get_engine(self) -> Any:
+        with self._inference_lock:
+            return self._get_engine_locked()
+
+    def _get_engine_locked(self) -> Any:
         if self._engine is not None:
             self._apply_detection_config()
             return self._engine
@@ -52,17 +73,32 @@ class RapidOCREngine:
         det_limit_side_len: int | None = None,
         max_side_len: int | None = None,
     ) -> None:
-        self.det_limit_side_len = det_limit_side_len
-        self.max_side_len = max_side_len
-        self._apply_detection_config()
+        with self._inference_lock:
+            self.det_limit_side_len = det_limit_side_len
+            self.max_side_len = max_side_len
+            self._apply_detection_config()
 
     def _apply_detection_config(self) -> None:
         if self._engine is None:
             return
-        if self.max_side_len is not None:
-            self._engine.max_side_len = self.max_side_len
-        if self.det_limit_side_len is not None and hasattr(self._engine, "text_det"):
-            self._engine.text_det.limit_side_len = self.det_limit_side_len
+        # Capture the library/model's real defaults before applying overrides;
+        # None means restore those values, including after a high-accuracy run.
+        if self._default_detection_config is None:
+            self._default_detection_config = (
+                getattr(self._engine, "max_side_len", _CONFIG_UNSET),
+                getattr(getattr(self._engine, "text_det", None), "limit_side_len", _CONFIG_UNSET),
+            )
+        default_max, default_det = self._default_detection_config
+        max_side = default_max if self.max_side_len is None else self.max_side_len
+        det_side = default_det if self.det_limit_side_len is None else self.det_limit_side_len
+        if max_side is not _CONFIG_UNSET:
+            self._engine.max_side_len = max_side
+        elif hasattr(self._engine, "max_side_len"):
+            del self._engine.max_side_len
+        if det_side is not _CONFIG_UNSET and hasattr(self._engine, "text_det"):
+            self._engine.text_det.limit_side_len = det_side
+        elif hasattr(getattr(self._engine, "text_det", None), "limit_side_len"):
+            del self._engine.text_det.limit_side_len
 
     async def recognize(self, image: np.ndarray, regions: list[TextRegion]) -> list[TextRegion]:
         height, width = image.shape[:2]
@@ -117,43 +153,65 @@ class RapidOCREngine:
             return self._get_engine()(image)
 
     def _recognize_crops(self, crops: list[tuple[TextRegion, np.ndarray]]) -> list[tuple[TextRegion, str, float]]:
-        engine = self._get_engine()
         results: list[tuple[TextRegion, str, float]] = []
         with self._inference_lock:
+            engine = self._get_engine()
             for region, crop in crops:
                 text, confidence = self._recognize_crop(engine, crop)
                 results.append((region, text, confidence))
         return results
 
     def _refine_regions(self, image: np.ndarray, regions: list[TextRegion]) -> None:
-        engine = self._get_engine()
         with self._inference_lock:
+            engine = self._get_engine()
             for region in regions:
-                crop = self._rotate_crop(image, region.polygon)
-                padded = self._rotate_crop(
-                    image, self._expand_polygon(region.polygon, 1.1)
-                )
-                variants: list[np.ndarray] = []
-                for base in (crop, padded):
-                    if base is None or base.size == 0:
-                        continue
-                    variants.extend(self._refine_variants(base))
+                if not self.refine_candidate_budget:
+                    region.metadata["ocr_refine_attempts"] = 0
+                    continue
+                def variants() -> Iterator[np.ndarray]:
+                    for polygon in (region.polygon, self._expand_polygon(region.polygon, 1.1)):
+                        base = self._rotate_crop(image, polygon)
+                        if base is not None and base.size:
+                            yield from self._refine_variants(base)
                 best = None
-                for variant in variants:
+                stable_text = None
+                stable_count = 0
+                attempts = 0
+                early_stopped = False
+                for variant in islice(variants(), self.refine_candidate_budget):
+                    attempts += 1
                     result = self._recognize_variant(engine, variant)
                     if result and result["text"] and (best is None or result["conf"] > best["conf"]):
                         best = result
+                    # Never stop on an unrelated high-confidence hallucination.
+                    # Require repeated agreement plus the existing conservative
+                    # text/length/confidence acceptance rules.
+                    qualified = (result is not None and self.refine_early_stop_confidence is not None
+                        and result["conf"] >= self.refine_early_stop_confidence
+                        and self._accept_refinement(region.source_text, region.confidence, result))
+                    if qualified:
+                        stable_count = stable_count + 1 if stable_text == result["text"] else 1
+                        stable_text = result["text"]
+                    else:
+                        stable_text, stable_count = None, 0
+                    if stable_count >= self.refine_stable_results:
+                        # An earlier unrelated result can have a larger score;
+                        # retain the stable, accepted reading selected here.
+                        best = result
+                        early_stopped = True
+                        break
+                region.metadata["ocr_refine_attempts"] = attempts
+                region.metadata["ocr_refine_early_stopped"] = early_stopped
                 if best and self._accept_refinement(region.source_text, region.confidence, best):
                     region.source_text = best["text"]
                     region.confidence = best["conf"]
                     region.metadata["ocr_refined"] = True
 
-    def _refine_variants(self, crop: np.ndarray) -> list[np.ndarray]:
-        variants = [crop]
+    def _refine_variants(self, crop: np.ndarray) -> Iterator[np.ndarray]:
+        yield crop
         upscaled = cv2.resize(crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-        variants.append(upscaled)
-        variants.append(self._clahe(upscaled))
-        return variants
+        yield upscaled
+        yield self._clahe(upscaled)
 
     def _recognize_variant(self, engine: Any, crop: np.ndarray) -> dict[str, Any] | None:
         if hasattr(engine, "recognize_txt"):

@@ -57,7 +57,7 @@ def test_new_api_channel_is_not_reported_saved_without_persisted_key(tmp_path: P
                 "service_name": "DeepSeek",
                 "enabled": True,
                 "base_url": "https://api.deepseek.com/v1",
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
             }
         )
 
@@ -71,7 +71,7 @@ def test_existing_channel_can_update_settings_without_reentering_key(tmp_path: P
         "service_name": "DeepSeek",
         "enabled": True,
         "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-v4-flash",
+        "model": "deepseek-flash",
         "api_key": "stored-secret",
     }
     application.save_api_channel(values)

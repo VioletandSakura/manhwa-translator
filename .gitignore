@@ -1,4 +1,7 @@
 .venv/
+.venv-*/
+.artifacts/
+.cache/
 *.egg-info/
 __pycache__/
 *.py[cod]
@@ -6,7 +9,9 @@ __pycache__/
 .coverage
 htmlcov/
 data/*.db*
+data/app.lock
 data/tasks/
+data/imports/
 logs/
 outputs/
 models/*
@@ -14,4 +19,8 @@ models/*
 fonts/*
 !fonts/.gitkeep
 .env
+.env.*
+!.env.example
 *.key
+build/
+dist/

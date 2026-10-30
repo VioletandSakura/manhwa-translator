@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from app.paths import AppPaths
 
 
-TEMP_ROOT = Path(r"D:\Chatgpt\99_Temp\manga-translator-personal")
+TEMP_ROOT = AppPaths.default().temp_root
 TEMP_ROOT.mkdir(parents=True, exist_ok=True)
 os.environ["TEMP"] = str(TEMP_ROOT)
 os.environ["TMP"] = str(TEMP_ROOT)
 os.environ["HF_HOME"] = str(TEMP_ROOT / "huggingface")
-os.environ["PIP_CACHE_DIR"] = str(Path(r"D:\Chatgpt\99_Temp\pip-cache"))
+os.environ["PIP_CACHE_DIR"] = str(TEMP_ROOT.parent / "pip")
 
 from app.main import main  # noqa: E402
 

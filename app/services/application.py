@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 import json
+import hashlib
 import re
+import threading
 import uuid
 import zipfile
 
@@ -18,6 +20,7 @@ from app.domain.enums import PageStatus, TaskStatus
 from app.domain.models import ApiChannelRecord, LibraryEntry, TextRegion
 from app.importing.importer import ImportedBatch, InputImporter
 from app.inpainting.opencv_inpainter import OpenCVInpainter
+from app.inpainting.masks import region_mask, restore_protected
 from app.ocr.rapidocr_engine import RapidOCREngine
 from app.ocr.mangaocr_engine import MangaOCREngine
 from app.paths import AppPaths
@@ -25,13 +28,16 @@ from app.rendering.pillow_renderer import PillowTextRenderer
 from app.security.credentials import CredentialStore
 from app.security.redaction import redact_text
 from app.storage.database import Database
+from app.storage.atomic import write_bytes
 from app.tasks.pipeline import PagePipeline, PipelineOptions, ProgressCallback
 from app.tasks.queue import PersistentTaskQueue
 from app.translation.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleTranslator
 from app.translation.router import ChannelRouterTranslator
+from app.translation.settings import ConfiguredTranslator, TranslationSettings, parse_pairs
 
 from .cached_translator import CachedTranslator
 from .safe_logger import SafeLogger
+from .page_artifacts import decode_image, manual_mask, source_image
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +61,7 @@ class TranslationApplication:
     DEFAULT_API = {
         "service_name": "DeepSeek",
         "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-v4-flash",
+        "model": "deepseek-flash",
         "timeout_seconds": 60,
         "retries": 2,
     }
@@ -73,12 +79,24 @@ class TranslationApplication:
         self.credentials = credentials or CredentialStore()
         self.logger = logger or SafeLogger(paths.logs_dir / "app.log")
         self._rapidocr_engine: RapidOCREngine | None = None
+        self._lama_cache: tuple[tuple, Any] | None = None
+        self._lama_cache_lock = threading.Lock()
 
     def initialize(self) -> None:
         """准备运行时目录、初始化数据库并修复异常中断的任务状态。"""
         self.paths.ensure_runtime_directories()
         self.database.initialize()
-        self.database.repair_completed_task_statuses()
+        recovered = self.database.recover_interrupted_tasks()
+        if recovered:
+            self.logger.info(f"发现{recovered}个中断任务，已转为可恢复状态；完成页保留")
+        from .text_exchange import TextExchangeService
+        for task in self.database.list_tasks(limit=None):
+            directory = Path(task.output_dir) / "metadata"
+            try:
+                if directory.is_dir():
+                    TextExchangeService.recover_pending(directory)
+            except (OSError, ValueError, TypeError) as error:
+                self.logger.warning(f"译文导入恢复暂不可用：{redact_text(str(error))}")
 
     def save_api_config(self, values: dict[str, object]) -> None:
         """保存旧版单通道 API 表单，并同步到默认通道。"""
@@ -117,9 +135,10 @@ class TranslationApplication:
         importer = InputImporter(self.paths.data_dir / "imports")
         imported = importer.import_sources([Path(source) for source in sources])
         source_label = " | ".join(str(Path(source)) for source in sources)
-        task_id = self.database.create_task(source_label, str(Path(output_dir)))
-        for page in imported.pages:
-            self.database.add_page(task_id, page.index, str(page.source_path))
+        task_id = self.database.create_task_with_pages(
+            source_label, str(Path(output_dir)),
+            [(page.index, str(page.source_path)) for page in imported.pages],
+        )
         self.logger.info(f"已创建批量任务：{len(imported.pages)}页")
         return BatchCreation(task_id=task_id, page_count=len(imported.pages), imported=imported)
 
@@ -192,6 +211,8 @@ class TranslationApplication:
 
     def save_library_content(self, category: str, name: str, payload: str) -> str:
         """保存术语表、提示词或替换规则等内容条目。"""
+        if category in {"glossary", "replacement"}:
+            parse_pairs(payload, glossary=category == "glossary")
         clean_name = name.strip()
         if not clean_name:
             raise ValueError("名称不能为空")
@@ -207,6 +228,12 @@ class TranslationApplication:
 
     def list_library_content(self, category: str) -> list[LibraryEntry]:
         return self.database.list_library_entries(category)
+
+    def save_render_settings(self, options: PipelineOptions) -> None:
+        self.database.set_setting("render.settings", json.dumps(options.render_settings(), ensure_ascii=False))
+
+    def load_render_settings(self) -> dict:
+        return json.loads(self.database.get_setting("render.settings", "{}"))
 
     def export_task_zip(self, task_id: str, target_path: Path) -> Path:
         """把任务中已完成的译图打包为 ZIP。"""
@@ -225,50 +252,33 @@ class TranslationApplication:
         return target_path
 
     def archive_originals(self, task_id: str) -> Path | None:
-        """Pack the original/ folder into originals.zip and remove loose copies.
-
-        Only runs for completed tasks and only after the zip is written and
-        verified, so originals are never lost if archiving fails.
-        """
+        """逐项校验文件清单、CRC 和内容后，才移除输出中的原图副本。"""
+        from .original_archive import archive_originals
         try:
             task = self.database.get_task(task_id)
             if task.status is not TaskStatus.COMPLETED:
                 return None
-            output_dir = Path(task.output_dir)
-            original_dir = output_dir / "original"
-            archive_path = output_dir / "originals.zip"
-            if archive_path.exists():
-                return archive_path
-            if not original_dir.is_dir():
-                return None
-            files = sorted(
-                (path for path in original_dir.iterdir() if path.is_file()),
-                key=lambda path: path.name,
-            )
-            if not files:
-                return None
-            with zipfile.ZipFile(
-                archive_path, "w", compression=zipfile.ZIP_DEFLATED
-            ) as archive:
-                for path in files:
-                    archive.write(path, arcname=path.name)
-            if not archive_path.is_file() or archive_path.stat().st_size <= 0:
-                raise RuntimeError("原图压缩包写入失败")
-            for path in files:
-                path.unlink()
-            try:
-                original_dir.rmdir()
-            except OSError:
-                pass
-            self.logger.info(f"原图已归档：{archive_path.name}")
-            return archive_path
+            pages = self.database.list_task_pages(task_id)
+            names = {Path(page.source_path).name for page in pages}
+            if len(names) != len(pages):
+                raise ValueError("任务包含重名原图，已保留全部副本")
+            return archive_originals(Path(task.output_dir), names)
         except Exception as error:
-            self.logger.warning(f"原图归档失败：{redact_text(str(error))}")
+            self.logger.warning(f"原图归档失败，副本保留：{redact_text(str(error))}")
             return None
 
-    async def rerender_metadata(self, metadata_path: Path) -> Path:
+    def load_page_source(self, metadata_path: Path) -> tuple[np.ndarray, bool]:
+        from .text_exchange import TextExchangeService
+        TextExchangeService.recover_pending(metadata_path.parent)
+        document = json.loads(metadata_path.read_text(encoding="utf-8"))
+        return source_image(metadata_path, document)
+
+    async def rerender_metadata(self, metadata_path: Path, *, render_options: PipelineOptions | None = None,
+                                inpainting_engine: str = "opencv") -> Path:
         """根据人工修改后的元数据重新渲染译图。"""
         metadata_path = Path(metadata_path)
+        from .text_exchange import TextExchangeService
+        TextExchangeService.recover_pending(metadata_path.parent)
         document = json.loads(metadata_path.read_text(encoding="utf-8"))
         regions = [
             TextRegion(
@@ -285,21 +295,77 @@ class TranslationApplication:
             for data in document.get("regions", [])
         ]
         task_output = metadata_path.parent.parent
+        image, original_available = source_image(metadata_path, document)
+        if not original_available and any(region.metadata.get("review_decision") == "rejected" for region in regions):
+            raise ValueError("缺少原图副本，无法恢复被擦除的原文。请先恢复原图或originals.zip。")
+        render_regions = [region for region in regions if region.translated_text.strip() and region.approved]
+        protected = [region for region in regions if region not in render_regions]
+        mask = region_mask(image.shape, render_regions, dilation=5)
+        mask = np.maximum(mask, manual_mask(metadata_path, document, image.shape))
+        protection = region_mask(image.shape, protected, dilation=1)
+        mask[protection > 0] = 0
         inpainted_path = task_output / "inpainted" / f"{metadata_path.stem}_inpainted.png"
-        image = cv2.imdecode(
-            np.frombuffer(inpainted_path.read_bytes(), dtype=np.uint8),
-            cv2.IMREAD_COLOR,
-        )
-        if image is None:
-            raise ValueError(f"缺少修复图，无法重新渲染：{inpainted_path}")
-        rendered = await PillowTextRenderer().render(image, regions)
+        signature = self._inpaint_signature(image, mask, protection, inpainting_engine)
+        cached = self._read_inpaint_cache(inpainted_path, document, signature, image.shape) if original_available else None
+        if cached is None:
+            inpainted = await self._build_inpainter(inpainting_engine).inpaint_mask(image, mask)
+            inpainted = restore_protected(inpainted, image, protected)
+            inpainted_path.parent.mkdir(parents=True, exist_ok=True)
+            encoded_base = PagePipeline._encode_image(".png", inpainted)
+            write_bytes(inpainted_path, encoded_base)
+            if original_available:
+                document["inpaint_cache"] = {"version": 1, "signature": signature,
+                                             "artifact_sha256": hashlib.sha256(encoded_base).hexdigest()}
+            else:
+                document.pop("inpaint_cache", None)
+        else:
+            inpainted = cached
+        options = render_options or PipelineOptions(translate=False, **document.get("render_settings", {}))
+        renderer = PillowTextRenderer(font_path=Path(options.font_path) if options.font_path else None,
+                                      min_font_size=options.min_font_size, max_font_size=options.max_font_size)
+        rendered = await renderer.render(inpainted, render_regions)
+        rendered = restore_protected(rendered, image, protected)
         translated_path = task_output / "translated" / f"{metadata_path.stem}_translated.png"
         translated_path.parent.mkdir(parents=True, exist_ok=True)
-        succeeded, encoded = cv2.imencode(".png", rendered)
-        if not succeeded:
-            raise ValueError(f"无法编码重渲染图片：{translated_path.name}")
-        translated_path.write_bytes(encoded.tobytes())
+        PagePipeline._write_image(translated_path, rendered)
+        document["regions"] = [asdict(region) for region in regions]
+        document["render_settings"] = options.render_settings()
+        document["original_available"] = original_available
+        write_bytes(metadata_path, json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8"))
         return translated_path
+
+    def _lama_model_identity(self) -> tuple:
+        model = self.paths.models_dir / "lama.onnx"
+        try:
+            state = model.stat()
+            return (str(model.resolve()), state.st_dev, state.st_ino, state.st_size, state.st_mtime_ns)
+        except OSError:
+            return (str(model.resolve()), None)
+
+    def _inpaint_signature(self, image: np.ndarray, mask: np.ndarray, protection: np.ndarray, engine: str) -> str:
+        # Hash pixels rather than source path/mtime: edits to an original or mask
+        # must invalidate the base even when the filename has not changed.
+        configuration = {"version": 1, "opencv": cv2.__version__, "engine": engine,
+                         "model": self._lama_model_identity() if engine == "lama_onnx" else None,
+                         "shape": image.shape, "dilation": 5, "protection_dilation": 1}
+        digest = hashlib.sha256(json.dumps(configuration, sort_keys=True).encode())
+        for pixels in (image, mask, protection):
+            digest.update(memoryview(np.ascontiguousarray(pixels)))
+        return digest.hexdigest()
+
+    @staticmethod
+    def _read_inpaint_cache(path: Path, document: dict, signature: str, shape: tuple) -> np.ndarray | None:
+        cached = document.get("inpaint_cache")
+        if not isinstance(cached, dict) or cached.get("version") != 1 or cached.get("signature") != signature:
+            return None
+        try:
+            data = path.read_bytes()
+            if hashlib.sha256(data).hexdigest() != cached.get("artifact_sha256"):
+                return None
+            image = decode_image(data, path.name)
+            return image if image.shape == shape else None
+        except (OSError, ValueError, cv2.error):
+            return None
 
     def load_api_config(self) -> dict[str, object]:
         """读取旧版单通道配置，密钥只以布尔标记返回。"""
@@ -326,11 +392,30 @@ class TranslationApplication:
         """列出全部 API 通道配置。"""
         return self.database.list_api_channels()
 
+    def validate_translation_configuration(self) -> None:
+        """Validate local API setup without sending any network requests."""
+        channels = self.database.list_api_channels(enabled_only=True)
+        if not channels:
+            raise ValueError("尚未配置可用的API通道。请先在“API管理”中保存并测试，或关闭“调用AI翻译”进行离线识别。")
+        verified = [channel for channel in channels if channel.verified]
+        if not verified:
+            raise ValueError("没有验证通过的API通道，请先在“API管理”中测试连通性。")
+        if not any(self.credentials.load(channel.id) for channel in verified):
+            raise ValueError("当前Windows账号未保存API Key，请在“API管理”中重新安全保存密钥。")
+
     def build_translator(self) -> CachedTranslator:
         """装配带 SQLite 缓存的多通道路由翻译器。"""
         channels = self.database.list_api_channels(enabled_only=True)
         if not channels:
             raise ValueError("尚未配置可用的API通道")
+
+        def content(category: str) -> str:
+            return "\n".join(entry.payload for entry in self.list_library_content(category) if entry.enabled)
+
+        settings = TranslationSettings(
+            prompt=content("prompt"), glossary=parse_pairs(content("glossary"), glossary=True),
+            replacements=parse_pairs(content("replacement"), glossary=False),
+        )
 
         def factory(channel: ApiChannelRecord, api_key: str) -> OpenAICompatibleTranslator:
             return OpenAICompatibleTranslator(
@@ -341,16 +426,17 @@ class TranslationApplication:
                     model=channel.model,
                     timeout_seconds=channel.timeout_seconds,
                     retries=channel.retries,
+                    system_prompt=settings.system_prompt,
                 )
             )
 
         delegate = ChannelRouterTranslator(self.database, self.credentials, factory)
-        route_signature = ",".join(f"{channel.id}:{channel.model}" for channel in channels)
+        route_signature = json.dumps([(channel.id, channel.base_url, channel.model) for channel in channels])
         return CachedTranslator(
             self.database,
-            delegate,
+            ConfiguredTranslator(delegate, settings),
             provider="API通道路由",
-            model=route_signature,
+            model=f"{route_signature}:settings:{settings.signature}",
         )
 
     def build_pipeline(
@@ -360,6 +446,9 @@ class TranslationApplication:
         ocr_engine: str = "rapidocr",
         inpainting_engine: str = "opencv",
         high_accuracy_ocr: bool = False,
+        font_path: str | None = None,
+        min_font_size: int = 10,
+        max_font_size: int = 64,
     ) -> PagePipeline:
         """按配置装配 OCR、擦字与渲染流水线。"""
         translator = self.build_translator() if translate else _UnusedTranslator()
@@ -369,22 +458,34 @@ class TranslationApplication:
             if ocr_engine == "mangaocr"
             else detector_ocr
         )
-        opencv_inpainter = OpenCVInpainter()
-        inpainter = (
-            FallbackInpainter(
-                LaMaONNXInpainter(self.paths.models_dir / "lama.onnx"),
-                opencv_inpainter,
-            )
-            if inpainting_engine == "lama_onnx"
-            else opencv_inpainter
-        )
+        inpainter = self._build_inpainter(inpainting_engine)
         return PagePipeline(
             detector=RapidOCRDetector(detector_ocr),
             ocr=ocr,
             translator=translator,
             inpainter=inpainter,
-            renderer=PillowTextRenderer(),
+            renderer=PillowTextRenderer(font_path=Path(font_path) if font_path else None,
+                                        min_font_size=min_font_size, max_font_size=max_font_size),
         )
+
+    def _build_inpainter(self, engine: str):
+        fallback = OpenCVInpainter()
+        if engine != "lama_onnx":
+            return fallback
+        identity = self._lama_model_identity()
+        with self._lama_cache_lock:
+            if self._lama_cache is not None and self._lama_cache[0] == identity:
+                return self._lama_cache[1]
+            try:
+                inpainter = FallbackInpainter(LaMaONNXInpainter(self.paths.models_dir / "lama.onnx"), fallback)
+                # One optional model session only; replacing the model drops the
+                # old reference rather than growing an unbounded session cache.
+                self._lama_cache = (identity, inpainter)
+                return inpainter
+            except Exception as error:
+                self._lama_cache = None
+                self.logger.warning(f"LaMa不可用，已使用OpenCV：{redact_text(str(error))}")
+                return fallback
 
     def _get_rapidocr_engine(self, *, high_accuracy_ocr: bool = False) -> RapidOCREngine:
         det_limit_side_len = 1280 if high_accuracy_ocr else None
@@ -421,6 +522,7 @@ class TranslationApplication:
             ocr_engine=ocr_engine,
             inpainting_engine=inpainting_engine,
             high_accuracy_ocr=high_accuracy_ocr,
+            **options.render_settings(),
         )
 
         async def process(page, output_dir, on_progress):
@@ -441,6 +543,7 @@ class TranslationApplication:
             on_page_completed=on_page_completed,
             on_page_failed=on_page_failed,
             on_page_progress=on_page_progress,
+            on_run_finished=getattr(pipeline.translator, "close", None),
         )
 
     async def test_api_connection(self) -> str:
@@ -507,7 +610,7 @@ class TranslationApplication:
         page_id = self.database.add_page(task_id, 0, str(source_path))
         self.database.update_task_status(task_id, TaskStatus.RUNNING)
         self.database.update_page_status(page_id, PageStatus.RUNNING, stage="准备", progress=0)
-        active_pipeline = pipeline or self.build_pipeline(translate=options.translate)
+        active_pipeline = pipeline or self.build_pipeline(translate=options.translate, **options.render_settings())
 
         def record_progress(stage: str, progress: int) -> None:
             self.database.update_page_status(page_id, PageStatus.RUNNING, stage=stage, progress=progress)

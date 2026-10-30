@@ -4,15 +4,42 @@
     {
       "id": "rapidocr-default",
       "purpose": "本地文字识别",
-      "status": "installed_in_project_venv",
+      "status": "required_for_ocr",
       "install_group": "ocr",
-      "storage": "D:\\Chatgpt\\01_Projects\\manga-translator-personal\\models",
-      "automatic_download": false,
-      "installed_size_mb": 30.28,
+      "storage": ".venv/Lib/site-packages/rapidocr/models",
+      "automatic_download": true,
+      "estimated_model_size_mb": 31,
       "files": [
         ".venv/Lib/site-packages/rapidocr/models/PP-OCRv6_det_small.onnx",
         ".venv/Lib/site-packages/rapidocr/models/ch_ppocr_mobile_v2.0_cls_mobile.onnx",
         ".venv/Lib/site-packages/rapidocr/models/PP-OCRv6_rec_small.onnx"
+      ],
+      "verified_rapidocr_version": "3.9.2",
+      "code_source": "https://github.com/RapidAI/RapidOCR",
+      "model_family_source": "https://github.com/PaddlePaddle/PaddleOCR",
+      "upstream_license": "Apache-2.0",
+      "verified_files": [
+        {
+          "filename": "PP-OCRv6_det_small.onnx",
+          "purpose": "det",
+          "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx",
+          "sha256": "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f",
+          "size_bytes": 9929594
+        },
+        {
+          "filename": "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+          "purpose": "cls",
+          "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+          "sha256": "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c",
+          "size_bytes": 585532
+        },
+        {
+          "filename": "PP-OCRv6_rec_small.onnx",
+          "purpose": "rec",
+          "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx",
+          "sha256": "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884",
+          "size_bytes": 21234383
+        }
       ]
     },
     {
@@ -20,20 +47,32 @@
       "purpose": "日文漫画专用OCR，支持横排、竖排和多行气泡文本",
       "status": "optional_not_downloaded",
       "install_group": "mangaocr",
-      "storage": "D:\\Chatgpt\\01_Projects\\manga-translator-personal\\models\\manga-ocr-base",
+      "storage": "models/manga-ocr-base",
       "automatic_download": false,
       "estimated_model_size_mb": 400,
-      "note": "另需PyTorch与Transformers，CPU依赖通常还会增加约1GB以上；CUDA版本更大。"
+      "note": "另需PyTorch与Transformers，CPU依赖通常还会增加约1GB以上；CUDA版本更大。",
+      "code_source": "https://github.com/kha-white/manga-ocr",
+      "weights_source": "https://huggingface.co/kha-white/manga-ocr-base",
+      "upstream_license": "Apache-2.0",
+      "verified_weights_sha256": null,
+      "release_tested": false
     },
     {
       "id": "lama-onnx",
       "purpose": "复杂背景与网点区域的本地擦字",
       "status": "optional_not_downloaded",
       "install_group": "lama",
-      "storage": "D:\\Chatgpt\\01_Projects\\manga-translator-personal\\models\\lama.onnx",
+      "storage": "models/lama.onnx",
       "automatic_download": false,
       "estimated_model_size_mb": "因ONNX导出版本而异，常见约100-250MB",
-      "note": "缺失、加载失败或推理失败时自动降级到OpenCV擦字。"
+      "note": "缺失、加载失败或推理失败时自动降级到OpenCV擦字。",
+      "research_source": "https://github.com/advimman/lama",
+      "weights_source": null,
+      "verified_weights_sha256": null,
+      "release_tested": false,
+      "license_note": "No ONNX export selected or distributed; verify the actual export and weights separately."
     }
-  ]
+  ],
+  "provenance_checked_on": "2026-10-31",
+  "weights_in_source_release": false
 }

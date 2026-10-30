@@ -4,10 +4,13 @@ import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
 from app.security.redaction import redact_text
+from app.tasks.control import checkpoint, controlled_sleep
+from .settings import DEFAULT_TRANSLATION_PROMPT
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +24,7 @@ class OpenAICompatibleConfig:
     timeout_seconds: float = 60.0
     retries: int = 2
     max_texts_per_request: int = 80
+    system_prompt: str = DEFAULT_TRANSLATION_PROMPT
 
     @classmethod
     def deepseek(cls, api_key: str) -> "OpenAICompatibleConfig":
@@ -28,7 +32,7 @@ class OpenAICompatibleConfig:
             service_name="DeepSeek",
             api_key=api_key,
             base_url="https://api.deepseek.com/v1",
-            model="deepseek-v4-flash",
+            model="deepseek-flash",
         )
 
 
@@ -36,6 +40,12 @@ class TranslationServiceError(RuntimeError):
     """翻译服务调用失败，消息已经过敏感信息脱敏。"""
 
     pass
+
+
+class TranslationCountError(TranslationServiceError):
+    """已按小块修复仍失败时，不自动重跑整页或换通道重复计费。"""
+
+    retryable = False
 
 
 class OpenAICompatibleTranslator:
@@ -100,11 +110,12 @@ class OpenAICompatibleTranslator:
         source_language: str,
         target_language: str,
         *,
-        system_prompt: str = "你是专业漫画翻译员。忠实、自然地翻译，不添加解释，只输出JSON对象。",
+        system_prompt: str | None = None,
         context: list[str] | None = None,
     ) -> list[str]:
         if not texts:
             return []
+        system_prompt = self.config.system_prompt if system_prompt is None else system_prompt
         limit = max(1, self.config.max_texts_per_request)
         if len(texts) > limit:
             translations: list[str] = []
@@ -136,6 +147,7 @@ class OpenAICompatibleTranslator:
         *,
         system_prompt: str,
         context: list[str] | None,
+        repair_count: bool = True,
     ) -> list[str]:
         payload = self._build_payload(texts, source_language, target_language, system_prompt, context)
         response = await self._request(payload)
@@ -145,8 +157,18 @@ class OpenAICompatibleTranslator:
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as error:
             raise TranslationServiceError("翻译服务返回了无法识别的数据格式") from error
         if len(translations) != len(texts):
-            raise TranslationServiceError(
+            if repair_count and len(texts) > 1:
+                middle = len(texts) // 2
+                repaired: list[str] = []
+                for chunk in (texts[:middle], texts[middle:]):
+                    repaired.extend(await self._translate_once(
+                        chunk, source_language, target_language, system_prompt=system_prompt,
+                        context=context, repair_count=False,
+                    ))
+                return repaired
+            raise TranslationCountError(
                 f"翻译条目数量不匹配：发送{len(texts)}条，收到{len(translations)}条"
+                "；本块已停止，请检查服务响应后重试（已完成块会使用缓存）"
             )
         return translations
 
@@ -167,7 +189,7 @@ class OpenAICompatibleTranslator:
             "context": context or [],
             "output_schema": {"translations": ["与texts等长的译文数组"]},
         }
-        return {
+        payload = {
             "model": self.config.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -176,6 +198,10 @@ class OpenAICompatibleTranslator:
             "temperature": 0.2,
             "response_format": {"type": "json_object"},
         }
+        if urlsplit(self.config.base_url).hostname == "api.deepseek.com":
+            # Ordinary dialogue translation should not silently use default high thinking.
+            payload["thinking"] = {"type": "disabled"}
+        return payload
 
     async def _request(self, payload: dict[str, Any]) -> httpx.Response:
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
@@ -185,13 +211,14 @@ class OpenAICompatibleTranslator:
         }
         last_error: Exception | None = None
         for attempt in range(self.config.retries + 1):
+            await checkpoint()
             try:
                 response = await self._client.post(url, headers=headers, json=payload)
                 if response.is_success:
                     return response
                 if response.status_code == 429 or response.status_code >= 500:
                     if attempt < self.config.retries:
-                        await asyncio.sleep(self._retry_delay(response, attempt))
+                        await controlled_sleep(self._retry_delay(response, attempt))
                         continue
                     self._raise_for_status(response)
                 self._raise_for_status(response)
@@ -201,7 +228,7 @@ class OpenAICompatibleTranslator:
                 last_error = error
                 if attempt >= self.config.retries:
                     raise TranslationServiceError("无法连接翻译服务，请检查网络、Base URL和超时设置") from error
-                await asyncio.sleep(self._backoff_seconds(attempt))
+                await controlled_sleep(self._backoff_seconds(attempt))
         raise TranslationServiceError(redact_text(str(last_error or "翻译请求失败")))
 
     @classmethod
@@ -250,7 +277,7 @@ class OpenAICompatibleTranslator:
             cleaned = cleaned.split("\n", 1)[-1]
             cleaned = cleaned.rsplit("```", 1)[0].strip()
         data = json.loads(cleaned)
-        translations = data.get("translations")
+        translations = data.get("translations") if isinstance(data, dict) else None
         if not isinstance(translations, list) or not all(isinstance(item, str) for item in translations):
             raise TranslationServiceError("翻译结果缺少translations数组")
         return translations

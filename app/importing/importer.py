@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import re
+import shutil
+import tempfile
 import uuid
 import zipfile
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote
@@ -75,6 +78,29 @@ class InputImporter:
                 raise ValueError(f"不支持的输入格式：{source.suffix}")
         if not imported:
             raise ValueError("输入中没有找到支持的漫画图片")
+        # All output artifacts are keyed by the source stem, including on
+        # Windows where case-only differences also refer to the same filename.
+        # Stage only ambiguous pages; leave ordinary inputs at their old paths.
+        stem_counts = Counter(path.stem.casefold() for path, _, _ in imported)
+        if any(count > 1 for count in stem_counts.values()):
+            workspace = workspace or self._new_workspace()
+            destination = Path(tempfile.mkdtemp(prefix="pages-", dir=workspace))
+            used_stems = set(stem_counts)
+            unique = []
+            for index, (path, chapter, metadata) in enumerate(imported):
+                if stem_counts[path.stem.casefold()] > 1:
+                    stem = f"{index + 1:06d}_{path.stem[:64]}"
+                    candidate, counter = stem, 0
+                    while candidate.casefold() in used_stems:
+                        counter += 1
+                        candidate = f"{stem}_{counter}"
+                    used_stems.add(candidate.casefold())
+                    target = destination / f"{candidate}{path.suffix}"
+                    shutil.copyfile(path, target)
+                    metadata = {**metadata, "original_name": metadata.get("original_name", path.name)}
+                    path = target
+                unique.append((path, chapter, metadata))
+            imported = unique
         pages = [
             ImportedPage(
                 index=index,
@@ -112,8 +138,9 @@ class InputImporter:
 
     def _import_zip(self, source: Path, workspace: Path) -> list[tuple[Path, str, dict[str, object]]]:
         """解压 ZIP/CBZ 中的图片，保持自然排序。"""
-        destination = workspace / source.stem
-        destination.mkdir(parents=True, exist_ok=True)
+        # Different inputs can have the same archive name. They must not share
+        # an extraction directory before the final page-name collision pass.
+        destination = Path(tempfile.mkdtemp(prefix=f"{source.stem[:48]}-", dir=workspace))
         with zipfile.ZipFile(source) as archive:
             members = self._validate_archive(archive)
             image_names = sorted(
@@ -131,8 +158,7 @@ class InputImporter:
 
     def _import_epub(self, source: Path, workspace: Path) -> list[tuple[Path, str, dict[str, object]]]:
         """按 EPUB Spine 顺序导入页面图片。"""
-        destination = workspace / source.stem
-        destination.mkdir(parents=True, exist_ok=True)
+        destination = Path(tempfile.mkdtemp(prefix=f"{source.stem[:48]}-", dir=workspace))
         with zipfile.ZipFile(source) as archive:
             members = self._validate_archive(archive)
             container = self._parse_xml(self._read_member(archive, members, "META-INF/container.xml"), "container.xml")
@@ -252,9 +278,12 @@ class InputImporter:
     def _extract_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo, destination: Path, index: int) -> Path:
         original_name = PurePosixPath(_safe_member_name(info.filename)).name
         target = destination / original_name
-        if target.exists():
-            target = destination / f"{index:06d}_{original_name}"
-        with archive.open(info) as source, target.open("wb") as output:
+        counter = 0
+        while target.exists():
+            prefix = f"{index:06d}" if counter == 0 else f"{index:06d}_{counter}"
+            target = destination / f"{prefix}_{original_name}"
+            counter += 1
+        with archive.open(info) as source, target.open("xb") as output:
             while chunk := source.read(1024 * 1024):
                 output.write(chunk)
         return target

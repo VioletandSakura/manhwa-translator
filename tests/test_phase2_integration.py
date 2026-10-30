@@ -67,7 +67,7 @@ def test_controller_processes_folder_as_persistent_offline_batch(tmp_path: Path,
     controller.resume_batch()
 
     assert application.database.get_task(task_id).status is TaskStatus.COMPLETED
-    assert window.stage_label.text().endswith("完成")
+    assert "完成2/2页" in window.stage_label.text()
     assert not window.resume_button.isEnabled()
 
 
@@ -87,7 +87,7 @@ def test_controller_requires_batch_name_before_creating_folder_task(tmp_path: Pa
 
     controller.start_translation()
 
-    assert errors == ["多图、文件夹、ZIP 或 EPUB 任务必须填写批次名称。"]
+    assert errors == ["多图、文件夹、ZIP、CBZ 或 EPUB 任务必须填写批次名称。"]
     assert application.database.list_tasks() == []
 
 
@@ -110,6 +110,25 @@ def test_controller_saves_local_content_preset_and_api_channel(tmp_path: Path, q
     assert application.list_library_content("glossary")[0].payload == "勇者\t勇者"
     assert application.list_library_content("preset")[0].name == "日漫简中"
     assert application.database.get_api_channel("deepseek-default").service_name == "DeepSeek"
+
+
+def test_missing_api_is_reported_without_creating_a_task(tmp_path: Path, qtbot, monkeypatch) -> None:
+    application = _application(tmp_path)
+    source = tmp_path / "page.png"
+    Image.new("RGB", (120, 80), "white").save(source)
+    window = MainWindow(application.paths)
+    qtbot.addWidget(window)
+    controller = MainController(application, window)
+    window.source_edit.setText(str(source))
+    errors = []
+    monkeypatch.setattr(window, "show_error", errors.append)
+
+    controller.start_translation()
+
+    assert errors and "尚未配置可用的API通道" in errors[0]
+    assert application.database.list_tasks() == []
+    assert window.start_button.isEnabled()
+    assert not controller._threads
 
 
 def test_controller_applies_saved_preset_without_api_key(tmp_path: Path, qtbot) -> None:

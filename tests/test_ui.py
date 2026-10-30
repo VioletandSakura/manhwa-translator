@@ -11,7 +11,7 @@ def test_main_window_uses_chinese_and_deepseek_defaults(qtbot) -> None:
     assert window.tabs.tabText(1) == "API管理"
     assert window.api_service_name.text() == "DeepSeek"
     assert window.api_base_url.text() == "https://api.deepseek.com/v1"
-    assert window.api_model.currentText() == "deepseek-v4-flash"
+    assert window.api_model.currentText() == "deepseek-flash"
     assert window.api_key.echoMode().name == "Password"
     assert window.output_edit.text() == str(AppPaths.default().output_root)
     assert "多图" in window.batch_name_edit.placeholderText()
@@ -25,6 +25,23 @@ def test_progress_updates_stage_and_value(qtbot) -> None:
 
     assert window.stage_label.text() == "当前阶段：OCR"
     assert window.progress_bar.value() == 30
+
+
+def test_numeric_controls_use_arabic_digits_in_macao_locale(qtbot) -> None:
+    from PySide6.QtCore import QLocale
+
+    previous = QLocale()
+    QLocale.setDefault(QLocale("zh_MO"))
+    try:
+        window = MainWindow(AppPaths.default())
+        qtbot.addWidget(window)
+        window.page_editor.width_value.setValue(12345)
+        window.progress_bar.setValue(50)
+        assert window.concurrent_pages.text() == "1"
+        assert window.page_editor.width_value.text() == "12345"
+        assert window.progress_bar.text() == "50%"
+    finally:
+        QLocale.setDefault(previous)
 
 
 def test_task_controls_are_enabled_only_while_busy(qtbot) -> None:
@@ -65,12 +82,12 @@ def test_api_model_selector_accepts_fetched_choices_and_custom_text(qtbot) -> No
     window = MainWindow(AppPaths.default())
     qtbot.addWidget(window)
 
-    window.set_api_model_choices(["deepseek-v4-flash", "deepseek-v4-pro"])
+    window.set_api_model_choices(["deepseek-flash", "deepseek-v4-pro"])
     window.api_model.setCurrentText("custom-model")
 
     assert window.api_model.isEditable()
     assert [window.api_model.itemText(index) for index in range(window.api_model.count())] == [
-        "deepseek-v4-flash",
+        "deepseek-flash",
         "deepseek-v4-pro",
     ]
     assert window.api_model.currentText() == "custom-model"

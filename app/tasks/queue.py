@@ -10,7 +10,7 @@ from app.domain.enums import PageStatus, TaskStatus
 from app.domain.models import PageRecord
 from app.security.redaction import redact_text
 from app.storage.database import Database
-
+from app.tasks.control import checkpoint_handler
 
 PageProgress = Callable[[str, int], None]
 PageProcessor = Callable[[PageRecord, Path, PageProgress], Awaitable[Any]]
@@ -19,22 +19,21 @@ QueueProgressCallback = Callable[[str, PageRecord, str, int], None]
 QueueTaskCallback = Callable[[str], None]
 
 
-class PersistentTaskQueue:
-    """持久化任务队列：支持暂停、取消、恢复、失败重试与页面并发。"""
+class QueueStopped(Exception):
+    """当前步骤安全结束后停止，留下可恢复页面。"""
 
-    def __init__(
-        self,
-        database: Database,
-        processor: PageProcessor,
-        *,
-        max_concurrent_pages: int = 1,
-        max_page_attempts: int = 1,
-        page_retry_delay_seconds: float = 1.0,
-        on_task_completed: QueueTaskCallback | None = None,
-        on_page_completed: QueueEventCallback | None = None,
-        on_page_failed: QueueEventCallback | None = None,
-        on_page_progress: QueueProgressCallback | None = None,
-    ) -> None:
+
+class PersistentTaskQueue:
+    """暂停在步骤边界等待；取消/退出不再开始新步骤或自动重试。"""
+
+    def __init__(self, database: Database, processor: PageProcessor, *,
+                 max_concurrent_pages: int = 1, max_page_attempts: int = 1,
+                 page_retry_delay_seconds: float = 1.0,
+                 on_task_completed: QueueTaskCallback | None = None,
+                 on_page_completed: QueueEventCallback | None = None,
+                 on_page_failed: QueueEventCallback | None = None,
+                 on_page_progress: QueueProgressCallback | None = None,
+                 on_run_finished: Callable[[], Awaitable[None]] | None = None) -> None:
         self.database = database
         self.processor = processor
         self.max_concurrent_pages = max(1, max_concurrent_pages)
@@ -44,18 +43,19 @@ class PersistentTaskQueue:
         self.on_page_completed = on_page_completed
         self.on_page_failed = on_page_failed
         self.on_page_progress = on_page_progress
+        self.on_run_finished = on_run_finished
         self._run_events: dict[str, threading.Event] = {}
         self._paused_tasks: set[str] = set()
         self._cancelled_tasks: set[str] = set()
+        self._stopped_tasks: set[str] = set()
+        self._running_tasks: set[str] = set()
 
     def pause(self, task_id: str) -> None:
-        """暂停任务，未完成页面保持可恢复状态。"""
         self._paused_tasks.add(task_id)
         self._event(task_id).clear()
         self.database.update_task_status(task_id, TaskStatus.PAUSED)
 
     def resume(self, task_id: str) -> bool:
-        """恢复已暂停任务；没有可恢复页面时返回 False。"""
         if not self.database.list_resumable_pages(task_id):
             self.database.repair_completed_task_statuses()
             return False
@@ -65,103 +65,154 @@ class PersistentTaskQueue:
         return True
 
     def cancel(self, task_id: str) -> None:
-        """取消任务并放行等待中的页面。"""
         self._cancelled_tasks.add(task_id)
         self._event(task_id).set()
         self.database.update_task_status(task_id, TaskStatus.CANCELLED)
 
+    def stop(self, task_id: str) -> None:
+        """退出应用：完成当前不可中断步骤后，把未完成页面留作待恢复。"""
+        self._stopped_tasks.add(task_id)
+        self._event(task_id).set()
+        self.database.update_task_status(task_id, TaskStatus.PAUSED)
+
     def retry_page(self, page_id: str) -> None:
-        """把单个失败页面重置为待处理并重跑任务。"""
         page = self.database.get_page(page_id)
+        if page.task_id in self._running_tasks:
+            raise ValueError("请等待当前任务安全结束后再重试")
+        if page.status not in {PageStatus.FAILED, PageStatus.CANCELLED}:
+            raise ValueError("只能重试失败或已取消的页面")
         self.database.reset_page_for_retry(page_id)
         self._cancelled_tasks.discard(page.task_id)
+        self._stopped_tasks.discard(page.task_id)
+        self._paused_tasks.discard(page.task_id)
         self.database.update_task_status(page.task_id, TaskStatus.PENDING)
 
-    async def run(self, task_id: str) -> None:
-        """运行任务的全部可恢复页面，完成后关闭数据库连接。"""
-        task = self.database.get_task(task_id)
-        event = self._event(task_id)
-        if task_id not in self._paused_tasks:
-            event.set()
-            self.database.update_task_status(task_id, TaskStatus.RUNNING)
-        pages = self.database.list_resumable_pages(task_id)
-        semaphore = asyncio.Semaphore(self.max_concurrent_pages)
+    async def checkpoint(self, task_id: str) -> None:
+        while True:
+            if task_id in self._cancelled_tasks or task_id in self._stopped_tasks:
+                raise QueueStopped()
+            if self._event(task_id).is_set():
+                return
+            await asyncio.sleep(0.05)
 
-        async def process_page(page: PageRecord) -> None:
-            async with semaphore:
-                await self._process_page(task_id, task, page, event)
+    async def run(self, task_id: str, *, page_ids: list[str] | None = None) -> None:
+        if task_id in self._running_tasks:
+            raise ValueError("该任务已经在运行")
+        self._running_tasks.add(task_id)
+        jobs: list[asyncio.Task] = []
+        try:
+            task = self.database.get_task(task_id)
+            pages = self.database.list_resumable_pages(task_id)
+            if page_ids is not None:
+                pages = [page for page in pages if page.id in page_ids]
+                if {page.id for page in pages} != set(page_ids):
+                    raise ValueError("单页重试的页面不属于此任务或不可重试")
+            if task_id not in self._paused_tasks:
+                self._event(task_id).set()
+                self.database.update_task_status(task_id, TaskStatus.RUNNING)
+            # A semaphore limits processing but still allocates one suspended
+            # Task per page. Keep only the configured number of workers alive.
+            pending = iter(pages)
 
-        await asyncio.gather(*(process_page(page) for page in pages))
-        self._finish_task(task_id)
-        if self.on_task_completed is not None:
-            self.on_task_completed(task_id)
-        self.database.close()
+            async def worker() -> None:
+                for page in pending:
+                    await self._process_page(task_id, task, page)
 
-    async def _process_page(
-        self,
-        task_id: str,
-        task,
-        page: PageRecord,
-        event: threading.Event,
-    ) -> None:
-        await asyncio.to_thread(event.wait)
-        if task_id in self._cancelled_tasks:
-            self.database.update_page_status(
-                page.id, PageStatus.CANCELLED, stage="已取消", progress=page.progress
-            )
-            return
-        last_error: Exception | None = None
-        result = None
-        for attempt in range(self.max_page_attempts):
-            self.database.increment_page_attempt(page.id)
-            stage = "准备" if attempt == 0 else f"自动重试 {attempt}"
-            self.database.update_page_status(page.id, PageStatus.RUNNING, stage=stage, progress=0)
-
-            def record_progress(stage: str, progress: int, *, page_id: str = page.id) -> None:
-                self.database.update_page_status(page_id, PageStatus.RUNNING, stage=stage, progress=progress)
-                if self.on_page_progress is not None:
-                    self.on_page_progress(task_id, self.database.get_page(page_id), stage, progress)
-
+            jobs = [asyncio.create_task(worker()) for _ in range(min(self.max_concurrent_pages, len(pages)))]
+            await asyncio.gather(*jobs)
+            self._finish_task(task_id)
+            if self.on_task_completed is not None:
+                self.on_task_completed(task_id)
+        except BaseException:
+            for job in jobs:
+                job.cancel()
+            await asyncio.gather(*jobs, return_exceptions=True)
+            for page in self.database.list_task_pages(task_id):
+                if page.status is PageStatus.RUNNING:
+                    self.database.update_page_status(page.id, PageStatus.PENDING,
+                                                     stage="处理被中断，等待恢复", progress=0)
+            self.database.update_task_status(task_id, TaskStatus.PAUSED)
+            raise
+        finally:
+            self._running_tasks.discard(task_id)
             try:
-                result = await self.processor(page, Path(task.output_dir), record_progress)
-                last_error = None
-                break
-            except Exception as error:
-                last_error = error
-                if attempt + 1 < self.max_page_attempts:
-                    await asyncio.sleep(self._page_retry_delay(attempt))
-        if last_error is not None:
-            message = redact_text(str(last_error))
-            self.database.update_page_status(
-                page.id, PageStatus.FAILED, stage="失败", progress=0, error=message
-            )
-            if self.on_page_failed is not None:
-                self.on_page_failed(task_id, self.database.get_page(page.id))
-            return
-        result_path = getattr(getattr(result, "artifacts", None), "translated", None)
-        self.database.set_page_result(page.id, None if result_path is None else str(result_path))
-        self.database.update_page_status(page.id, PageStatus.COMPLETED, stage="保存", progress=100)
-        if self.on_page_completed is not None:
-            self.on_page_completed(task_id, self.database.get_page(page.id))
+                if self.on_run_finished is not None:
+                    await self.on_run_finished()
+            finally:
+                self.database.close()
+
+    async def _process_page(self, task_id, task, page) -> None:
+        control_token = checkpoint_handler.set(lambda: self.checkpoint(task_id))
+        try:
+            await self.checkpoint(task_id)
+            last_error = None
+            result = None
+            for attempt in range(self.max_page_attempts):
+                await self.checkpoint(task_id)
+                self.database.increment_page_attempt(page.id)
+                self.database.update_page_status(page.id, PageStatus.RUNNING,
+                    stage="准备" if attempt == 0 else f"自动重试 {attempt}", progress=0)
+
+                def record_progress(stage: str, progress: int) -> None:
+                    self.database.update_page_status(page.id, PageStatus.RUNNING, stage=stage, progress=progress)
+                    if self.on_page_progress is not None:
+                        self.on_page_progress(task_id, self.database.get_page(page.id), stage, progress)
+
+                # Preserve the three-argument processor API; the pipeline can
+                # await this checkpoint between costly steps.
+                record_progress.checkpoint = lambda: self.checkpoint(task_id)
+                try:
+                    result = await self.processor(page, Path(task.output_dir), record_progress)
+                    last_error = None
+                    break
+                except QueueStopped:
+                    raise
+                except Exception as error:
+                    last_error = error
+                    if getattr(error, "retryable", True) is False:
+                        break
+                    if attempt + 1 < self.max_page_attempts:
+                        deadline = asyncio.get_running_loop().time() + self._page_retry_delay(attempt)
+                        while asyncio.get_running_loop().time() < deadline:
+                            await self.checkpoint(task_id)
+                            await asyncio.sleep(0.05)
+            if last_error is not None:
+                await self.checkpoint(task_id)
+                self.database.update_page_status(page.id, PageStatus.FAILED, stage="失败", progress=0,
+                                                 error=redact_text(str(last_error)))
+                if self.on_page_failed is not None:
+                    self.on_page_failed(task_id, self.database.get_page(page.id))
+                return
+            result_path = getattr(getattr(result, "artifacts", None), "translated", None)
+            self.database.set_page_result(page.id, None if result_path is None else str(result_path))
+            self.database.update_page_status(page.id, PageStatus.COMPLETED, stage="保存", progress=100)
+            if self.on_page_completed is not None:
+                self.on_page_completed(task_id, self.database.get_page(page.id))
+        except QueueStopped:
+            cancelled = task_id in self._cancelled_tasks
+            self.database.update_page_status(page.id, PageStatus.CANCELLED if cancelled else PageStatus.PENDING,
+                stage="已取消" if cancelled else "安全停止，等待恢复", progress=0)
+        finally:
+            checkpoint_handler.reset(control_token)
 
     def _page_retry_delay(self, attempt: int) -> float:
         return min(30.0, self.page_retry_delay_seconds * (2**attempt))
 
     def _finish_task(self, task_id: str) -> None:
         pages = self.database.list_task_pages(task_id)
-        if task_id in self._cancelled_tasks or any(page.status is PageStatus.CANCELLED for page in pages):
+        if pages and all(page.status is PageStatus.COMPLETED for page in pages):
+            status = TaskStatus.COMPLETED
+        elif task_id in self._cancelled_tasks or any(page.status is PageStatus.CANCELLED for page in pages):
             status = TaskStatus.CANCELLED
+        elif task_id in self._stopped_tasks or task_id in self._paused_tasks:
+            status = TaskStatus.PAUSED
         elif any(page.status is PageStatus.FAILED for page in pages):
             status = TaskStatus.FAILED
-        elif pages and all(page.status is PageStatus.COMPLETED for page in pages):
-            status = TaskStatus.COMPLETED
         else:
-            status = TaskStatus.PAUSED if task_id in self._paused_tasks else TaskStatus.PENDING
+            status = TaskStatus.PENDING
         self.database.update_task_status(task_id, status)
 
     def _event(self, task_id: str) -> threading.Event:
-        event = self._run_events.get(task_id)
-        if event is None:
-            event = threading.Event()
-            self._run_events[task_id] = event
-        return event
+        if task_id not in self._run_events:
+            self._run_events[task_id] = threading.Event()
+        return self._run_events[task_id]

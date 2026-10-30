@@ -75,6 +75,22 @@ def test_editor_can_save_local_mask(tmp_path: Path, qtbot) -> None:
     assert Image.open(mask_path).getbbox() is not None
 
 
+def test_editor_save_applies_typed_text_and_undo_restores_previous_text(tmp_path: Path, qtbot) -> None:
+    image, metadata = _page_files(tmp_path)
+    editor = PageEditorWidget()
+    qtbot.addWidget(editor)
+    editor.load_page(image, metadata)
+    editor.select_region("r1")
+    editor.translation_text.setText("没有点击应用也应保存")
+
+    editor.save_page()
+
+    saved = json.loads(metadata.read_text(encoding="utf-8"))
+    assert saved["regions"][0]["translated_text"] == "没有点击应用也应保存"
+    editor.undo_stack.undo()
+    assert editor._regions["r1"].translated_text == "译文"
+
+
 def test_editor_highlights_review_region_and_shows_chinese_reason(tmp_path: Path, qtbot) -> None:
     image, metadata = _page_files(tmp_path)
     document = json.loads(metadata.read_text(encoding="utf-8"))

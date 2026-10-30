@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.storage.database import Database
+from app.tasks.control import checkpoint
 
 
 class CachedTranslator:
@@ -24,11 +25,13 @@ class CachedTranslator:
         )
         resolved: dict[str, str] = dict(cache)
         missing = list(dict.fromkeys(text for text in texts if text not in cache))
-        if missing:
-            translations = await self.delegate.translate(missing, source_language, target_language)
+        for start in range(0, len(missing), 80):
+            await checkpoint()
+            chunk = missing[start:start + 80]
+            translations = await self.delegate.translate(chunk, source_language, target_language)
             new_entries = {
                 source_text: translated_text
-                for source_text, translated_text in zip(missing, translations, strict=True)
+                for source_text, translated_text in zip(chunk, translations, strict=True)
             }
             resolved.update(new_entries)
             self.database.put_translation_cache_many(

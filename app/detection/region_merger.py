@@ -70,7 +70,9 @@ def _merge(first: TextRegion, second: TextRegion) -> TextRegion:
     polygon = [(int(x), int(y)) for x, y in hull.tolist()]
     ordered = sorted(
         [first, second],
-        key=lambda region: (region.bounds[1], region.bounds[0]),
+        key=(lambda region: (-region.bounds[2], region.bounds[1]))
+        if first.direction == "vertical" else
+        (lambda region: (region.bounds[1], region.bounds[0])),
     )
     source_text = "\n".join(_region_text(region) for region in ordered if _region_text(region))
     metadata = dict(first.metadata)

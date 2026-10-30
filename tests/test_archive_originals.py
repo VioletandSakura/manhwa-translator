@@ -33,6 +33,9 @@ def _completed_task_with_originals(
     (original_dir / "1.png").write_bytes(b"one")
     (original_dir / "2.png").write_bytes(b"two")
     task_id = application.database.create_task("src", str(output))
+    for index, name in enumerate(("1.png", "2.png")):
+        page_id = application.database.add_page(task_id, index, name)
+        application.database.update_page_status(page_id, PageStatus.COMPLETED, stage="保存", progress=100)
     application.database.update_task_status(task_id, TaskStatus.COMPLETED)
     return application, task_id, output
 
@@ -67,7 +70,7 @@ def test_archive_skips_task_that_is_not_completed(tmp_path: Path) -> None:
 
 def test_archive_skips_task_with_failed_pages(tmp_path: Path) -> None:
     application, task_id, output = _completed_task_with_originals(tmp_path)
-    page_id = application.database.add_page(task_id, 0, "page.png")
+    page_id = application.database.list_task_pages(task_id)[0].id
     application.database.update_page_status(
         page_id, PageStatus.FAILED,
         stage="失败",
@@ -84,7 +87,7 @@ def test_archive_skips_task_with_failed_pages(tmp_path: Path) -> None:
 
 def test_archive_skips_task_with_cancelled_pages(tmp_path: Path) -> None:
     application, task_id, output = _completed_task_with_originals(tmp_path)
-    page_id = application.database.add_page(task_id, 0, "page.png")
+    page_id = application.database.list_task_pages(task_id)[0].id
     application.database.update_page_status(
         page_id, PageStatus.CANCELLED,
         stage="已取消",

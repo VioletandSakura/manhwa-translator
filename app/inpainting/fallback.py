@@ -19,3 +19,10 @@ class FallbackInpainter:
         except Exception as error:
             self.last_error = str(error)
             return await self.fallback.inpaint(image, regions)
+
+    async def inpaint_mask(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        try:
+            return await self.primary.inpaint_mask(image, mask)
+        except Exception as error:
+            self.last_error = str(error)
+            return await self.fallback.inpaint_mask(image, mask)

@@ -79,6 +79,28 @@ def test_page_pipeline_saves_separate_intermediate_artifacts(tmp_path: Path) -> 
     assert progress[-1] == ("保存", 100)
 
 
+def test_ocr_only_preserves_source_lettering_and_never_calls_translator(tmp_path: Path) -> None:
+    class UnexpectedTranslator:
+        async def translate(self, *args):
+            raise AssertionError("OCR-only mode must not contact the translation service")
+
+    source = tmp_path / "page.png"
+    image = np.full((120, 220, 3), 255, dtype=np.uint8)
+    cv2.putText(image, "HELLO", (25, 65), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+    Image.fromarray(image).save(source)
+    pipeline = PagePipeline(
+        detector=FakeDetector(), ocr=FakeOCR(), translator=UnexpectedTranslator(),
+        inpainter=OpenCVInpainter(), renderer=PillowTextRenderer(),
+    )
+    result = asyncio.run(pipeline.process(source, tmp_path / "out", PipelineOptions(translate=False)))
+
+    assert np.array_equal(np.asarray(Image.open(result.artifacts.translated)), image)
+    assert np.array_equal(np.asarray(Image.open(result.artifacts.inpainted)), image)
+    document = json.loads(result.artifacts.metadata.read_text(encoding="utf-8"))
+    assert document["processing_mode"] == "ocr_only"
+    assert document["regions"][0]["source_text"] == "Hello"
+
+
 def test_low_ocr_confidence_is_marked_for_review(tmp_path: Path) -> None:
     class LowConfidenceOCR(FakeOCR):
         async def recognize(self, image: np.ndarray, regions: list[TextRegion]) -> list[TextRegion]:

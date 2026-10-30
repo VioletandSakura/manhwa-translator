@@ -74,14 +74,14 @@ def test_deepseek_model_id_is_normalized_when_channel_is_saved(tmp_path: Path) -
             "id": "deepseek-default",
             "service_name": "DeepSeek",
             "base_url": "https://api.deepseek.com/v1",
-            "model": "DeepSeek-V4-Flash",
+            "model": "DeepSeek-Flash",
             "api_key": "local-secret",
             "timeout_seconds": 60,
             "retries": 4,
         }
     )
 
-    assert application.database.get_api_channel("deepseek-default").model == "deepseek-v4-flash"
+    assert application.database.get_api_channel("deepseek-default").model == "deepseek-flash"
 
 
 def test_application_exports_completed_pages_to_zip_with_original_names(tmp_path: Path) -> None:

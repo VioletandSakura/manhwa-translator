@@ -11,6 +11,7 @@ from app.domain.models import ApiChannelRecord
 from app.security.credentials import CredentialStore
 from app.security.redaction import redact_text
 from app.storage.database import Database
+from app.tasks.control import checkpoint, controlled_sleep
 
 from .openai_compatible import TranslationServiceError
 
@@ -50,7 +51,11 @@ class AsyncRateLimiter:
                 if len(self._timestamps) < self.limit:
                     self._timestamps.append(now)
                     return
-                await self.sleep(max(0, self.window_seconds - (now - self._timestamps[0])))
+                delay = max(0, self.window_seconds - (now - self._timestamps[0]))
+                if self.sleep is asyncio.sleep:
+                    await controlled_sleep(delay)
+                else:
+                    await self.sleep(delay)
 
 
 class ChannelRouterTranslator:
@@ -82,20 +87,26 @@ class ChannelRouterTranslator:
             raise TranslationServiceError("没有已启用且验证通过的API通道")
         failures: list[str] = []
         for channel in channels:
+            await checkpoint()
             key = self.credentials.load(channel.id)
             if not key:
                 message = "未保存API Key"
                 self.database.set_api_channel_health(channel.id, verified=False, last_error=message)
                 failures.append(f"{channel.service_name}: {message}")
                 continue
-            translator = self._translators.setdefault(channel.id, self.factory(channel, key))
+            if channel.id not in self._translators:
+                self._translators[channel.id] = self.factory(channel, key)
+            translator = self._translators[channel.id]
             limiter = self._limiters.setdefault(channel.id, AsyncRateLimiter(channel.rpm_limit))
             semaphore = self._semaphores.setdefault(channel.id, asyncio.Semaphore(max(1, channel.max_concurrency)))
             try:
                 await limiter.acquire()
                 async with semaphore:
+                    await checkpoint()
                     result = await translator.translate(texts, source_language, target_language)
             except TranslationServiceError as error:
+                if getattr(error, "retryable", True) is False:
+                    raise
                 message = redact_text(str(error))
                 self.database.set_api_channel_health(channel.id, verified=True, last_error=message)
                 failures.append(f"{channel.service_name}: {message}")
@@ -117,7 +128,13 @@ class ChannelRouterTranslator:
         return ordered
 
     async def close(self) -> None:
-        for translator in self._translators.values():
-            close = getattr(translator, "close", None)
-            if close is not None:
-                await close()
+        try:
+            for translator in self._translators.values():
+                close = getattr(translator, "close", None)
+                if close is not None:
+                    await close()
+        finally:
+            self._translators.clear()
+            self._limiters.clear()
+            self._semaphores.clear()
+            self._loop = None

@@ -72,7 +72,8 @@ def test_merges_vertical_boxes_side_by_side() -> None:
     merged = merge_text_regions([first, second])
 
     assert len(merged) == 1
-    assert merged[0].source_text == "\u7b2c\u4e00\u5217\n\u7b2c\u4e8c\u5217"
+    # The right-hand column (b) is read before the left-hand column (a).
+    assert merged[0].source_text == "\u7b2c\u4e8c\u5217\n\u7b2c\u4e00\u5217"
 
 
 def test_does_not_merge_mixed_directions() -> None:

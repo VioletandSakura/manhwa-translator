@@ -34,9 +34,20 @@ def test_deepseek_translation_uses_chat_completions_without_images() -> None:
     assert captured_request is not None
     payload = json.loads(captured_request.content)
     assert captured_request.url.path.endswith("/chat/completions")
-    assert payload["model"] == "deepseek-v4-flash"
+    assert payload["model"] == "deepseek-flash"
+    assert payload["thinking"] == {"type": "disabled"}
     assert "json" in " ".join(message["content"] for message in payload["messages"]).casefold()
     assert "image_url" not in captured_request.content.decode("utf-8")
+    asyncio.run(client.aclose())
+
+
+def test_compatible_providers_do_not_receive_deepseek_specific_options() -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200)))
+    translator = OpenAICompatibleTranslator(OpenAICompatibleConfig(
+        service_name="Compatible", api_key="test-key", base_url="https://example.test/v1", model="custom",
+    ), client=client)
+    payload = translator._build_payload(["Hello"], "en", "zh-Hans", "Return JSON", None)
+    assert "thinking" not in payload
     asyncio.run(client.aclose())
 
 
@@ -45,7 +56,7 @@ def test_connection_check_uses_models_endpoint_without_translation_cost() -> Non
 
     async def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(200, json={"data": [{"id": "deepseek-v4-flash"}]})
+        return httpx.Response(200, json={"data": [{"id": "deepseek-flash"}]})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     translator = OpenAICompatibleTranslator(
@@ -54,7 +65,7 @@ def test_connection_check_uses_models_endpoint_without_translation_cost() -> Non
 
     result = asyncio.run(translator.test_connection())
 
-    assert result == "deepseek-v4-flash"
+    assert result == "deepseek-flash"
     assert len(requests) == 1
     assert requests[0].method == "GET"
     assert requests[0].url.path.endswith("/models")
@@ -68,7 +79,7 @@ def test_list_models_returns_unique_sorted_model_ids() -> None:
             json={
                 "data": [
                     {"id": "deepseek-v4-pro"},
-                    {"id": "deepseek-v4-flash"},
+                    {"id": "deepseek-flash"},
                     {"id": "deepseek-v4-pro"},
                 ]
             },
@@ -81,7 +92,7 @@ def test_list_models_returns_unique_sorted_model_ids() -> None:
 
     models = asyncio.run(translator.list_models())
 
-    assert models == ["deepseek-v4-flash", "deepseek-v4-pro"]
+    assert models == ["deepseek-flash", "deepseek-v4-pro"]
     asyncio.run(client.aclose())
 
 
@@ -99,7 +110,7 @@ def test_connection_check_does_not_repeat_slow_network_failure() -> None:
             service_name="DeepSeek",
             api_key="secret-key",
             base_url="https://api.deepseek.com/v1",
-            model="deepseek-v4-flash",
+            model="deepseek-flash",
             timeout_seconds=60,
             retries=4,
         ),
@@ -115,7 +126,7 @@ def test_connection_check_does_not_repeat_slow_network_failure() -> None:
 
 def test_connection_check_reports_configured_model_not_available() -> None:
     async def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"data": [{"id": "deepseek-v4-flash"}]})
+        return httpx.Response(200, json={"data": [{"id": "deepseek-flash"}]})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     translator = OpenAICompatibleTranslator(
@@ -212,7 +223,7 @@ def test_translation_retries_rate_limit_then_succeeds(monkeypatch) -> None:
             service_name="DeepSeek",
             api_key="secret-key",
             base_url="https://api.deepseek.com/v1",
-            model="deepseek-v4-flash",
+            model="deepseek-flash",
             retries=2,
         ),
         client=client,
@@ -251,7 +262,7 @@ def test_translation_honors_retry_after_header(monkeypatch) -> None:
             service_name="DeepSeek",
             api_key="secret-key",
             base_url="https://api.deepseek.com/v1",
-            model="deepseek-v4-flash",
+            model="deepseek-flash",
             retries=1,
         ),
         client=client,
@@ -285,7 +296,7 @@ def test_translation_gives_up_after_retrying_server_errors(monkeypatch) -> None:
             service_name="DeepSeek",
             api_key="secret-key",
             base_url="https://api.deepseek.com/v1",
-            model="deepseek-v4-flash",
+            model="deepseek-flash",
             retries=2,
         ),
         client=client,
@@ -324,7 +335,7 @@ def test_translation_retries_network_errors_with_backoff(monkeypatch) -> None:
             service_name="DeepSeek",
             api_key="secret-key",
             base_url="https://api.deepseek.com/v1",
-            model="deepseek-v4-flash",
+            model="deepseek-flash",
             retries=2,
         ),
         client=client,
@@ -361,7 +372,7 @@ def test_translation_splits_large_text_batches() -> None:
             service_name="DeepSeek",
             api_key="secret-key",
             base_url="https://api.deepseek.com/v1",
-            model="deepseek-v4-flash",
+            model="deepseek-flash",
             max_texts_per_request=2,
         ),
         client=client,

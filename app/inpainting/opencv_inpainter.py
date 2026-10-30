@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 
 from app.domain.models import TextRegion
+from .masks import region_mask
 
 
 class OpenCVInpainter:
@@ -14,12 +15,11 @@ class OpenCVInpainter:
         self.radius = max(1, radius)
 
     async def inpaint(self, image: np.ndarray, regions: list[TextRegion]) -> np.ndarray:
-        if not regions:
+        return await self.inpaint_mask(image, region_mask(image.shape, regions, self.dilation))
+
+    async def inpaint_mask(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        if mask.shape != image.shape[:2]:
+            raise ValueError("蒙版尺寸与原图不一致。")
+        if not np.any(mask):
             return image.copy()
-        mask = np.zeros(image.shape[:2], dtype=np.uint8)
-        for region in regions:
-            cv2.fillPoly(mask, [np.asarray(region.polygon, dtype=np.int32)], 255)
-        if self.dilation:
-            size = self.dilation * 2 + 1
-            mask = cv2.dilate(mask, np.ones((size, size), np.uint8), iterations=1)
         return cv2.inpaint(image, mask, self.radius, cv2.INPAINT_TELEA)

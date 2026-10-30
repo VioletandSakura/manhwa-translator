@@ -1,0 +1,67 @@
+name: Windows source release acceptance
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: '1'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Build and extract allowlisted source archive
+        shell: pwsh
+        run: |
+          python scripts/build_source_release.py
+          $archive = Get-ChildItem .artifacts/release/*-source.zip | Select-Object -First 1
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath "$env:RUNNER_TEMP/source-acceptance"
+          $source = (Get-ChildItem "$env:RUNNER_TEMP/source-acceptance" -Directory | Select-Object -First 1).FullName
+          "RELEASE_SOURCE=$source" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Install extracted source into its own new environment
+        shell: pwsh
+        run: |
+          & "$env:RELEASE_SOURCE/scripts/setup.ps1" -Dev -Python (Get-Command python).Source
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run complete offline unit and Qt suite from archive
+        shell: pwsh
+        run: |
+          Set-Location $env:RELEASE_SOURCE
+          & .venv/Scripts/python.exe -m pytest -q --junitxml=.artifacts/tests.xml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prepare default OCR models in the new environment
+        shell: pwsh
+        run: |
+          Set-Location $env:RELEASE_SOURCE
+          & .venv/Scripts/python.exe scripts/smoke_release.py --prepare-models --output-dir .artifacts/model-bootstrap
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify real OCR and complete local workflow with network blocked
+        shell: pwsh
+        run: |
+          Set-Location $env:RELEASE_SOURCE
+          & .venv/Scripts/python.exe scripts/smoke_release.py --output-dir .artifacts/release-smoke
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .venv/Scripts/python.exe -m pip check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain source, checksums and acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-py312-source-acceptance
+          path: |
+            .artifacts/release/
+            ${{ env.RELEASE_SOURCE }}/.artifacts/tests.xml
+            ${{ env.RELEASE_SOURCE }}/.artifacts/model-bootstrap/report.json
+            ${{ env.RELEASE_SOURCE }}/.artifacts/release-smoke/

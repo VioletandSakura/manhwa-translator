@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 
 from app.domain.models import TextRegion
+from .masks import region_mask
 
 
 class LaMaONNXInpainter:
@@ -24,11 +25,12 @@ class LaMaONNXInpainter:
         self._session = ort.InferenceSession(str(self.model_path), providers=active_providers)
 
     async def inpaint(self, image: np.ndarray, regions: list[TextRegion]) -> np.ndarray:
-        mask = np.zeros(image.shape[:2], dtype=np.uint8)
-        for region in regions:
-            polygon = np.asarray(region.polygon, dtype=np.int32)
-            if len(polygon) >= 3:
-                cv2.fillPoly(mask, [polygon], 255)
+        mask = region_mask(image.shape, regions)
+        return await self.inpaint_mask(image, mask)
+
+    async def inpaint_mask(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        if mask.shape != image.shape[:2]:
+            raise ValueError("蒙版尺寸与原图不一致。")
         if not np.any(mask):
             return image.copy()
         height, width = image.shape[:2]

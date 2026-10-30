@@ -2,7 +2,25 @@ from pathlib import Path
 
 import pytest
 
-from app.services.output_paths import batch_requires_name, resolve_batch_output
+from app.services.output_paths import batch_requires_name, ensure_output_writable, resolve_batch_output
+
+
+def test_output_check_leaves_no_probe_files(tmp_path: Path) -> None:
+    output = tmp_path / "新建输出目录"
+    ensure_output_writable(output)
+    assert output.is_dir()
+    assert list(output.iterdir()) == []
+
+
+def test_output_check_explains_permission_failure(tmp_path: Path, monkeypatch) -> None:
+    import app.services.output_paths as output_paths
+
+    def denied(**kwargs):
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(output_paths.tempfile, "TemporaryFile", denied)
+    with pytest.raises(ValueError, match="请选择当前账号有写入权限"):
+        ensure_output_writable(tmp_path)
 
 
 def test_resolve_batch_output_uses_user_named_child_directory(tmp_path: Path) -> None:

@@ -214,8 +214,8 @@ def test_rapidocr_engine_switches_detection_config_on_shared_instance() -> None:
 
     ocr.set_detection_config(det_limit_side_len=None, max_side_len=None)
 
-    assert engine_obj.max_side_len == 4000
-    assert engine_obj.text_det.limit_side_len == 1280
+    assert engine_obj.max_side_len == 2000
+    assert engine_obj.text_det.limit_side_len == 736
 
 
 def test_rapidocr_detector_merges_split_bubble_boxes() -> None:

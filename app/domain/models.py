@@ -44,6 +44,10 @@ class TextRegion:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
+    def approved(self) -> bool:
+        return not self.needs_review and self.metadata.get("review_decision") != "rejected"
+
+    @property
     def bounds(self) -> tuple[int, int, int, int]:
         xs = [point[0] for point in self.polygon]
         ys = [point[1] for point in self.polygon]
