@@ -1,23 +1,30 @@
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "manga-translator-personal"
-version = "0.1.0"
+version = "0.1.0a1"
 description = "Windows 个人离线优先漫画翻译桌面软件"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+authors = [{name = "VioletandSakura"}]
+
 dependencies = [
   "httpx>=0.27,<1",
   "numpy>=2.0,<3",
   "opencv-python>=4.10,<6",
   "Pillow>=11,<13",
-  "PySide6>=6.8,<7",
+  "PySide6-Essentials>=6.8,<7",
   "keyring>=25,<26",
 ]
 
 [project.optional-dependencies]
 ocr = ["onnxruntime>=1.20,<2", "rapidocr>=3,<4"]
+mangaocr = ["manga-ocr>=0.1,<1"]
+lama = ["onnxruntime>=1.20,<2"]
 dev = [
   "pytest>=8,<9",
   "pytest-cov>=6,<8",
@@ -25,9 +32,16 @@ dev = [
   "respx>=0.22,<1",
 ]
 
+[project.urls]
+Repository = "https://github.com/VioletandSakura/manhwa-translator"
+Issues = "https://github.com/VioletandSakura/manhwa-translator/issues"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["app*"]
+
+[tool.setuptools.package-data]
+"app.ui" = ["assets/*.svg"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

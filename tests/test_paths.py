@@ -1,15 +1,18 @@
 from pathlib import Path
 
 from app.paths import AppPaths
+import app.paths as paths_module
 
 
-def test_default_paths_stay_on_d_drive() -> None:
+def test_default_paths_follow_checkout_location(tmp_path, monkeypatch) -> None:
+    checkout = tmp_path / "漫画翻译器 checkout"
+    monkeypatch.setattr(paths_module, "__file__", str(checkout / "app" / "paths.py"))
     paths = AppPaths.default()
 
-    assert paths.project_root == Path(r"D:\Chatgpt\01_Projects\manga-translator-personal")
-    assert paths.output_root == Path(r"D:\Chatgpt\04_Documents\manga-translator-results")
-    assert paths.temp_root == Path(r"D:\Chatgpt\99_Temp\manga-translator-personal")
-    assert all(path.drive.upper() == "D:" for path in paths.runtime_directories())
+    assert paths.project_root == checkout
+    assert paths.output_root == checkout / "outputs"
+    assert paths.temp_root == checkout / ".cache" / "tmp"
+    assert paths.database_path == checkout / "data" / "app.db"
 
 
 def test_task_directory_rejects_unsafe_task_id() -> None:

@@ -32,9 +32,13 @@ class FakeOCR:
 
 
 class FakeTranslator:
+    def __init__(self) -> None:
+        self.received_texts: list[str] = []
+
     async def translate(self, texts: list[str], source_language: str, target_language: str) -> list[str]:
         assert source_language == "auto"
         assert target_language == "zh-Hans"
+        self.received_texts.extend(texts)
         return ["你好"]
 
 
@@ -44,7 +48,7 @@ def _make_page(path: Path) -> None:
 
 
 def test_page_pipeline_saves_separate_intermediate_artifacts(tmp_path: Path) -> None:
-    source = tmp_path / "001.png"
+    source = tmp_path / "第001页.png"
     _make_page(source)
     progress: list[tuple[str, int]] = []
     pipeline = PagePipeline(
@@ -58,7 +62,7 @@ def test_page_pipeline_saves_separate_intermediate_artifacts(tmp_path: Path) -> 
     result = asyncio.run(
         pipeline.process(
             source,
-            tmp_path / "output",
+            tmp_path / "中文批次",
             PipelineOptions(),
             on_progress=lambda stage, value: progress.append((stage, value)),
         )
@@ -73,6 +77,28 @@ def test_page_pipeline_saves_separate_intermediate_artifacts(tmp_path: Path) -> 
     assert metadata["regions"][0]["source_text"] == "Hello"
     assert metadata["regions"][0]["translated_text"] == "你好"
     assert progress[-1] == ("保存", 100)
+
+
+def test_ocr_only_preserves_source_lettering_and_never_calls_translator(tmp_path: Path) -> None:
+    class UnexpectedTranslator:
+        async def translate(self, *args):
+            raise AssertionError("OCR-only mode must not contact the translation service")
+
+    source = tmp_path / "page.png"
+    image = np.full((120, 220, 3), 255, dtype=np.uint8)
+    cv2.putText(image, "HELLO", (25, 65), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+    Image.fromarray(image).save(source)
+    pipeline = PagePipeline(
+        detector=FakeDetector(), ocr=FakeOCR(), translator=UnexpectedTranslator(),
+        inpainter=OpenCVInpainter(), renderer=PillowTextRenderer(),
+    )
+    result = asyncio.run(pipeline.process(source, tmp_path / "out", PipelineOptions(translate=False)))
+
+    assert np.array_equal(np.asarray(Image.open(result.artifacts.translated)), image)
+    assert np.array_equal(np.asarray(Image.open(result.artifacts.inpainted)), image)
+    document = json.loads(result.artifacts.metadata.read_text(encoding="utf-8"))
+    assert document["processing_mode"] == "ocr_only"
+    assert document["regions"][0]["source_text"] == "Hello"
 
 
 def test_low_ocr_confidence_is_marked_for_review(tmp_path: Path) -> None:
@@ -95,6 +121,85 @@ def test_low_ocr_confidence_is_marked_for_review(tmp_path: Path) -> None:
     result = asyncio.run(pipeline.process(source, tmp_path / "out", PipelineOptions(review_threshold=0.6)))
 
     assert result.regions[0].needs_review is True
+
+
+def test_review_region_is_not_translated_inpainted_or_rendered(tmp_path: Path) -> None:
+    class IsolatedDigitOCR(FakeOCR):
+        async def recognize(self, image: np.ndarray, regions: list[TextRegion]) -> list[TextRegion]:
+            regions[0].source_text = "6"
+            regions[0].confidence = 0.95
+            return regions
+
+    class RecordingInpainter:
+        def __init__(self) -> None:
+            self.region_ids: list[str] = []
+
+        async def inpaint(self, image: np.ndarray, regions: list[TextRegion]) -> np.ndarray:
+            self.region_ids = [region.id for region in regions]
+            return image.copy()
+
+    class RecordingRenderer:
+        def __init__(self) -> None:
+            self.region_ids: list[str] = []
+
+        async def render(self, image: np.ndarray, regions: list[TextRegion]) -> np.ndarray:
+            self.region_ids = [region.id for region in regions]
+            return image.copy()
+
+    source = tmp_path / "page.png"
+    _make_page(source)
+    translator = FakeTranslator()
+    inpainter = RecordingInpainter()
+    renderer = RecordingRenderer()
+    pipeline = PagePipeline(
+        detector=FakeDetector(),
+        ocr=IsolatedDigitOCR(),
+        translator=translator,
+        inpainter=inpainter,
+        renderer=renderer,
+    )
+
+    result = asyncio.run(pipeline.process(source, tmp_path / "out", PipelineOptions()))
+
+    region = result.regions[0]
+    assert region.needs_review is True
+    assert region.metadata["auto_processing_excluded_reason"] == "isolated_ascii_alphanumeric"
+    assert region.translated_text == ""
+    assert translator.received_texts == []
+    assert inpainter.region_ids == []
+    assert renderer.region_ids == []
+
+
+def test_single_japanese_character_is_still_processed(tmp_path: Path) -> None:
+    class JapaneseCharacterOCR(FakeOCR):
+        async def recognize(self, image: np.ndarray, regions: list[TextRegion]) -> list[TextRegion]:
+            regions[0].source_text = "ん"
+            regions[0].confidence = 0.95
+            return regions
+
+    source = tmp_path / "page.png"
+    _make_page(source)
+    translator = FakeTranslator()
+    pipeline = PagePipeline(
+        detector=FakeDetector(),
+        ocr=JapaneseCharacterOCR(),
+        translator=translator,
+        inpainter=OpenCVInpainter(),
+        renderer=PillowTextRenderer(),
+    )
+
+    result = asyncio.run(pipeline.process(source, tmp_path / "out", PipelineOptions()))
+
+    assert result.regions[0].needs_review is False
+    assert translator.received_texts == ["ん"]
+
+
+def test_suspicious_ocr_text_reasons_are_conservative() -> None:
+    assert PagePipeline._review_exclusion_reason("U") == "isolated_ascii_alphanumeric"
+    assert PagePipeline._review_exclusion_reason("6") == "isolated_ascii_alphanumeric"
+    assert PagePipeline._review_exclusion_reason("?????") == "punctuation_or_symbol_only"
+    assert PagePipeline._review_exclusion_reason("ん") is None
+    assert PagePipeline._review_exclusion_reason("恋人だよな…？") is None
 
 
 def test_opencv_detector_finds_dark_text_cluster() -> None:
@@ -123,3 +228,35 @@ def test_inpainter_and_renderer_preserve_resolution() -> None:
     assert rendered.shape == image.shape
     assert np.any(rendered != cleaned)
 
+
+def test_renderer_caches_fonts_by_size(tmp_path: Path, monkeypatch) -> None:
+    import PIL.ImageFont as ImageFont
+
+    font_path = tmp_path / "font.ttf"
+    font_path.write_bytes(b"")
+    renderer = PillowTextRenderer(font_path=font_path)
+    calls: list[tuple[str, int]] = []
+
+    def fake_truetype(path: str, size: int):
+        calls.append((path, size))
+        return object()
+
+    monkeypatch.setattr(ImageFont, "truetype", fake_truetype)
+
+    first = renderer._load_font(18)
+    second = renderer._load_font(18)
+    third = renderer._load_font(24)
+
+    assert first is second
+    assert third is not first
+    assert calls == [(str(font_path), 18), (str(font_path), 24)]
+
+
+def test_review_exclusion_marks_short_ascii_as_sound_effect_like() -> None:
+    assert PagePipeline._review_exclusion_reason("EF") == "sound_effect_like"
+    assert PagePipeline._review_exclusion_reason("8300") == "sound_effect_like"
+    assert PagePipeline._review_exclusion_reason("pi~") == "sound_effect_like"
+    assert PagePipeline._review_exclusion_reason("9=") == "sound_effect_like"
+    assert PagePipeline._review_exclusion_reason("LMEIS") is None
+    assert PagePipeline._review_exclusion_reason("JII+4") is None
+    assert PagePipeline._review_exclusion_reason("\u3042") is None

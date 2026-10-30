@@ -8,6 +8,8 @@ from app.security.redaction import redact_text
 
 
 class SafeLogger:
+    """线程安全的本地日志器，写入前统一脱敏。"""
+
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -28,4 +30,3 @@ class SafeLogger:
         with self._lock:
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(line)
-

@@ -1,0 +1,35 @@
+name: 使用问题
+description: 报告可复现的安装、处理、编辑或导出问题
+title: "[问题] "
+body:
+  - type: markdown
+    attributes:
+      value: "请勿上传 API 密钥、私人漫画或完整数据库；日志中的姓名、路径和账号也请先移除。"
+  - type: input
+    id: version
+    attributes:
+      label: 软件版本
+      placeholder: 0.1.0-alpha.1
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Windows 与 Python 版本
+      placeholder: Windows 11，Python 3.12 x64
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 如何复现
+      description: 从打开软件开始，写出最少操作步骤；注明是否调用在线翻译。
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: 预期与实际结果
+      description: 有权公开的最小样例、脱敏截图或错误码可以附在这里。
+    validations:
+      required: true

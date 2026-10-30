@@ -14,6 +14,8 @@ class CredentialBackend(Protocol):
 
 
 class CredentialStore:
+    """把 API 密钥保存在 Windows 凭据管理器，避免写入数据库或日志。"""
+
     SERVICE_NAME = "MangaTranslatorPersonal"
 
     def __init__(self, backend: CredentialBackend = keyring) -> None:
@@ -32,4 +34,3 @@ class CredentialStore:
             self._backend.delete_password(self.SERVICE_NAME, channel_id)
         except keyring.errors.PasswordDeleteError:
             return
-

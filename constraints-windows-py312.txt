@@ -1,0 +1,47 @@
+# Verified Windows x64 / CPython 3.12 runtime + dev dependency set.
+# Used by scripts/setup.ps1. Optional MangaOCR/LaMa models are not part of this set.
+# This is a version constraint set, not a hash-locked wheel bundle.
+setuptools==84.2.1
+httpx==0.28.1
+keyring==25.7.0
+numpy==2.5.1
+opencv-python==5.0.0.93
+Pillow==12.3.0
+PySide6_Essentials==6.11.1
+shiboken6==6.11.1
+onnxruntime==1.28.0
+rapidocr==3.9.2
+anyio==4.14.2
+certifi==2026.7.22
+h11==0.16.0
+httpcore==1.0.9
+idna==3.18
+typing_extensions==4.16.0
+jaraco.classes==3.4.0
+jaraco.context==6.1.2
+jaraco.functools==4.6.0
+more-itertools==11.1.0
+pywin32-ctypes==0.2.3
+flatbuffers==25.12.19
+packaging==26.3
+protobuf==7.35.1
+pyclipper==1.4.0
+six==1.17.0
+Shapely==2.1.2
+PyYAML==6.0.3
+tqdm==4.70.0
+omegaconf==2.3.1
+antlr4-python3-runtime==4.9.3
+requests==2.34.2
+charset-normalizer==3.4.9
+urllib3==2.7.0
+colorlog==6.12.0
+colorama==0.4.6
+pytest==8.4.2
+pytest-cov==7.1.0
+pytest-qt==4.5.0
+respx==0.23.1
+coverage==7.15.4
+iniconfig==2.3.0
+pluggy==1.6.0
+Pygments==2.20.0

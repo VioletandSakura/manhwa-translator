@@ -1,0 +1,32 @@
+{
+  "license": "MIT",
+  "artwork": "Original generated fixtures, VioletandSakura and contributors",
+  "font_file_distributed": false,
+  "cases": [
+    {
+      "file": "horizontal.png",
+      "expected_texts": [
+        "こんにちは！",
+        "今日は一緒に学校へ行こう。"
+      ],
+      "sha256": "bf54c402f5852087e5d89ac71c80f15849ad7df7b3755f17078268e8a615877e"
+    },
+    {
+      "file": "vertical.png",
+      "expected_texts": [
+        "ちょっと待って！",
+        "その扉を開けないで。"
+      ],
+      "sha256": "78510d7cc2e70443452de3c6713bdf55e64a8e68d51125aabad7f6f71d45806d"
+    },
+    {
+      "file": "textured.png",
+      "expected_texts": [
+        "ありがとう。",
+        "また明日会おうね。",
+        "ドーン"
+      ],
+      "sha256": "ce19a63c2f4625eb38f4e6cbbfb42888abf95c6988a3e2375098ab331315f8d5"
+    }
+  ]
+}

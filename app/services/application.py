@@ -1,23 +1,43 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+import json
+import hashlib
+import re
+import threading
+import uuid
+import zipfile
+
+import cv2
+import numpy as np
 
 from app.detection.rapidocr_detector import RapidOCRDetector
+from app.inpainting.fallback import FallbackInpainter
+from app.inpainting.lama_onnx import LaMaONNXInpainter
 from app.domain.enums import PageStatus, TaskStatus
+from app.domain.models import ApiChannelRecord, LibraryEntry, TextRegion
+from app.importing.importer import ImportedBatch, InputImporter
 from app.inpainting.opencv_inpainter import OpenCVInpainter
+from app.inpainting.masks import region_mask, restore_protected
 from app.ocr.rapidocr_engine import RapidOCREngine
+from app.ocr.mangaocr_engine import MangaOCREngine
 from app.paths import AppPaths
 from app.rendering.pillow_renderer import PillowTextRenderer
 from app.security.credentials import CredentialStore
 from app.security.redaction import redact_text
 from app.storage.database import Database
+from app.storage.atomic import write_bytes
 from app.tasks.pipeline import PagePipeline, PipelineOptions, ProgressCallback
+from app.tasks.queue import PersistentTaskQueue
 from app.translation.openai_compatible import OpenAICompatibleConfig, OpenAICompatibleTranslator
+from app.translation.router import ChannelRouterTranslator
+from app.translation.settings import ConfiguredTranslator, TranslationSettings, parse_pairs
 
 from .cached_translator import CachedTranslator
 from .safe_logger import SafeLogger
+from .page_artifacts import decode_image, manual_mask, source_image
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,12 +47,21 @@ class ProcessingOutcome:
     result: Any
 
 
+@dataclass(frozen=True, slots=True)
+class BatchCreation:
+    task_id: str
+    page_count: int
+    imported: ImportedBatch
+
+
 class TranslationApplication:
+    """个人漫画翻译器的应用门面：装配 OCR、翻译、擦字、渲染与任务队列。"""
+
     CHANNEL_ID = "deepseek-default"
     DEFAULT_API = {
         "service_name": "DeepSeek",
         "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat",
+        "model": "deepseek-flash",
         "timeout_seconds": 60,
         "retries": 2,
     }
@@ -49,32 +78,297 @@ class TranslationApplication:
         self.database = database or Database(paths.database_path)
         self.credentials = credentials or CredentialStore()
         self.logger = logger or SafeLogger(paths.logs_dir / "app.log")
+        self._rapidocr_engine: RapidOCREngine | None = None
+        self._lama_cache: tuple[tuple, Any] | None = None
+        self._lama_cache_lock = threading.Lock()
 
     def initialize(self) -> None:
+        """准备运行时目录、初始化数据库并修复异常中断的任务状态。"""
         self.paths.ensure_runtime_directories()
         self.database.initialize()
+        recovered = self.database.recover_interrupted_tasks()
+        if recovered:
+            self.logger.info(f"发现{recovered}个中断任务，已转为可恢复状态；完成页保留")
+        from .text_exchange import TextExchangeService
+        for task in self.database.list_tasks(limit=None):
+            directory = Path(task.output_dir) / "metadata"
+            try:
+                if directory.is_dir():
+                    TextExchangeService.recover_pending(directory)
+            except (OSError, ValueError, TypeError) as error:
+                self.logger.warning(f"译文导入恢复暂不可用：{redact_text(str(error))}")
 
     def save_api_config(self, values: dict[str, object]) -> None:
+        """保存旧版单通道 API 表单，并同步到默认通道。"""
         service_name = str(values.get("service_name") or "").strip()
         base_url = str(values.get("base_url") or "").strip()
-        model = str(values.get("model") or "").strip()
+        model = self._normalize_api_model(service_name, base_url, str(values.get("model") or "").strip())
         if not service_name or not base_url or not model:
             raise ValueError("服务名称、Base URL和模型不能为空")
         api_key = str(values.get("api_key") or "").strip()
         if api_key:
             self.credentials.save(self.CHANNEL_ID, api_key)
-        settings = {
-            "service_name": service_name,
-            "base_url": base_url,
-            "model": model,
-            "timeout_seconds": str(int(values.get("timeout_seconds") or 60)),
-            "retries": str(int(values.get("retries") or 2)),
-        }
-        for key, value in settings.items():
-            self.database.set_setting(f"api.{key}", value)
+        if not self.credentials.load(self.CHANNEL_ID):
+            raise ValueError("请输入并保存API Key；Windows凭据管理器中尚无此通道的密钥")
+        verified, last_error = self._existing_channel_state(self.CHANNEL_ID)
+        self._persist_api_channel(
+            ApiChannelRecord(
+                id=self.CHANNEL_ID,
+                service_name=service_name,
+                enabled=True,
+                base_url=base_url,
+                model=model,
+                timeout_seconds=int(values.get("timeout_seconds") or 60),
+                max_concurrency=1,
+                rpm_limit=60,
+                retries=int(values.get("retries") or 2),
+                priority=10,
+                strategy="priority",
+                verified=verified,
+                last_error=last_error,
+            )
+        )
         self.logger.info(f"已保存API配置：{service_name} / {model}")
 
+    def create_batch_task(self, sources: list[Path], output_dir: Path) -> BatchCreation:
+        """导入输入并创建持久化的批量翻译任务。"""
+        importer = InputImporter(self.paths.data_dir / "imports")
+        imported = importer.import_sources([Path(source) for source in sources])
+        source_label = " | ".join(str(Path(source)) for source in sources)
+        task_id = self.database.create_task_with_pages(
+            source_label, str(Path(output_dir)),
+            [(page.index, str(page.source_path)) for page in imported.pages],
+        )
+        self.logger.info(f"已创建批量任务：{len(imported.pages)}页")
+        return BatchCreation(task_id=task_id, page_count=len(imported.pages), imported=imported)
+
+    def save_api_channel(self, values: dict[str, object]) -> str:
+        """保存或更新一个 API 通道，密钥只写入 Windows 凭据管理器。"""
+        channel_id = str(values.get("id") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", channel_id):
+            raise ValueError("API通道编号只能包含字母、数字、下划线和短横线")
+        service_name = str(values.get("service_name") or "").strip()
+        base_url = str(values.get("base_url") or "").strip()
+        model = self._normalize_api_model(service_name, base_url, str(values.get("model") or "").strip())
+        if not service_name or not model or not base_url.startswith(("https://", "http://")):
+            raise ValueError("服务名称、有效Base URL和模型不能为空")
+        verified, last_error = self._existing_channel_state(channel_id)
+        api_key = str(values.get("api_key") or "").strip()
+        if api_key:
+            self.credentials.save(channel_id, api_key)
+        if not self.credentials.load(channel_id):
+            raise ValueError("请输入并保存API Key；Windows凭据管理器中尚无此通道的密钥")
+        self._persist_api_channel(
+            ApiChannelRecord(
+                id=channel_id,
+                service_name=service_name,
+                enabled=bool(values.get("enabled", True)),
+                base_url=base_url,
+                model=model,
+                timeout_seconds=max(5, int(values.get("timeout_seconds") or 60)),
+                max_concurrency=max(1, int(values.get("max_concurrency") or 1)),
+                rpm_limit=max(1, int(values.get("rpm_limit") or 60)),
+                retries=max(0, int(values.get("retries") or 2)),
+                priority=int(values.get("priority") or 100),
+                strategy=str(values.get("strategy") or "priority"),
+                verified=verified,
+                last_error=last_error,
+            )
+        )
+        return channel_id
+
+    def _existing_channel_state(self, channel_id: str) -> tuple[bool, str | None]:
+        """读取通道已有的验证状态，新通道返回未验证。"""
+        try:
+            existing = self.database.get_api_channel(channel_id)
+            return existing.verified, existing.last_error
+        except KeyError:
+            return False, None
+
+    def _persist_api_channel(self, channel: ApiChannelRecord) -> None:
+        """写入通道记录；默认通道同时同步旧版单通道设置。"""
+        self.database.upsert_api_channel(channel)
+        if channel.id == self.CHANNEL_ID:
+            for key, value in {
+                "service_name": channel.service_name,
+                "base_url": channel.base_url,
+                "model": channel.model,
+                "timeout_seconds": str(channel.timeout_seconds),
+                "retries": str(channel.retries),
+            }.items():
+                self.database.set_setting(f"api.{key}", value)
+
+    @staticmethod
+    def _normalize_api_model(service_name: str, base_url: str, model: str) -> str:
+        if service_name.casefold() == "deepseek" or "api.deepseek.com" in base_url.casefold():
+            return model.casefold()
+        return model
+
+    def delete_api_channel(self, channel_id: str) -> None:
+        """删除 API 通道及其本地密钥。"""
+        self.database.delete_api_channel(channel_id)
+        self.credentials.revoke(channel_id)
+
+    def save_library_content(self, category: str, name: str, payload: str) -> str:
+        """保存术语表、提示词或替换规则等内容条目。"""
+        if category in {"glossary", "replacement"}:
+            parse_pairs(payload, glossary=category == "glossary")
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("名称不能为空")
+        existing = next(
+            (entry for entry in self.database.list_library_entries(category) if entry.name == clean_name),
+            None,
+        )
+        entry_id = existing.id if existing is not None else uuid.uuid4().hex
+        self.database.upsert_library_entry(
+            LibraryEntry(entry_id, category, clean_name, payload, True, 100)
+        )
+        return entry_id
+
+    def list_library_content(self, category: str) -> list[LibraryEntry]:
+        return self.database.list_library_entries(category)
+
+    def save_render_settings(self, options: PipelineOptions) -> None:
+        self.database.set_setting("render.settings", json.dumps(options.render_settings(), ensure_ascii=False))
+
+    def load_render_settings(self) -> dict:
+        return json.loads(self.database.get_setting("render.settings", "{}"))
+
+    def export_task_zip(self, task_id: str, target_path: Path) -> Path:
+        """把任务中已完成的译图打包为 ZIP。"""
+        target_path = Path(target_path)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        used_names: set[str] = set()
+        with zipfile.ZipFile(target_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for page in self.database.list_task_pages(task_id):
+                if not page.result_path or not Path(page.result_path).is_file():
+                    continue
+                name = f"{Path(page.source_path).stem}.png"
+                if name in used_names:
+                    name = f"{page.page_index + 1:04d}_{name}"
+                used_names.add(name)
+                archive.write(page.result_path, arcname=name)
+        return target_path
+
+    def archive_originals(self, task_id: str) -> Path | None:
+        """逐项校验文件清单、CRC 和内容后，才移除输出中的原图副本。"""
+        from .original_archive import archive_originals
+        try:
+            task = self.database.get_task(task_id)
+            if task.status is not TaskStatus.COMPLETED:
+                return None
+            pages = self.database.list_task_pages(task_id)
+            names = {Path(page.source_path).name for page in pages}
+            if len(names) != len(pages):
+                raise ValueError("任务包含重名原图，已保留全部副本")
+            return archive_originals(Path(task.output_dir), names)
+        except Exception as error:
+            self.logger.warning(f"原图归档失败，副本保留：{redact_text(str(error))}")
+            return None
+
+    def load_page_source(self, metadata_path: Path) -> tuple[np.ndarray, bool]:
+        from .text_exchange import TextExchangeService
+        TextExchangeService.recover_pending(metadata_path.parent)
+        document = json.loads(metadata_path.read_text(encoding="utf-8"))
+        return source_image(metadata_path, document)
+
+    async def rerender_metadata(self, metadata_path: Path, *, render_options: PipelineOptions | None = None,
+                                inpainting_engine: str = "opencv") -> Path:
+        """根据人工修改后的元数据重新渲染译图。"""
+        metadata_path = Path(metadata_path)
+        from .text_exchange import TextExchangeService
+        TextExchangeService.recover_pending(metadata_path.parent)
+        document = json.loads(metadata_path.read_text(encoding="utf-8"))
+        regions = [
+            TextRegion(
+                id=str(data["id"]),
+                polygon=[tuple(point) for point in data["polygon"]],
+                source_text=str(data.get("source_text", "")),
+                translated_text=str(data.get("translated_text", "")),
+                confidence=float(data.get("confidence", 0)),
+                direction=str(data.get("direction", "horizontal")),
+                angle=float(data.get("angle", 0)),
+                needs_review=bool(data.get("needs_review", False)),
+                metadata=dict(data.get("metadata", {})),
+            )
+            for data in document.get("regions", [])
+        ]
+        task_output = metadata_path.parent.parent
+        image, original_available = source_image(metadata_path, document)
+        if not original_available and any(region.metadata.get("review_decision") == "rejected" for region in regions):
+            raise ValueError("缺少原图副本，无法恢复被擦除的原文。请先恢复原图或originals.zip。")
+        render_regions = [region for region in regions if region.translated_text.strip() and region.approved]
+        protected = [region for region in regions if region not in render_regions]
+        mask = region_mask(image.shape, render_regions, dilation=5)
+        mask = np.maximum(mask, manual_mask(metadata_path, document, image.shape))
+        protection = region_mask(image.shape, protected, dilation=1)
+        mask[protection > 0] = 0
+        inpainted_path = task_output / "inpainted" / f"{metadata_path.stem}_inpainted.png"
+        signature = self._inpaint_signature(image, mask, protection, inpainting_engine)
+        cached = self._read_inpaint_cache(inpainted_path, document, signature, image.shape) if original_available else None
+        if cached is None:
+            inpainted = await self._build_inpainter(inpainting_engine).inpaint_mask(image, mask)
+            inpainted = restore_protected(inpainted, image, protected)
+            inpainted_path.parent.mkdir(parents=True, exist_ok=True)
+            encoded_base = PagePipeline._encode_image(".png", inpainted)
+            write_bytes(inpainted_path, encoded_base)
+            if original_available:
+                document["inpaint_cache"] = {"version": 1, "signature": signature,
+                                             "artifact_sha256": hashlib.sha256(encoded_base).hexdigest()}
+            else:
+                document.pop("inpaint_cache", None)
+        else:
+            inpainted = cached
+        options = render_options or PipelineOptions(translate=False, **document.get("render_settings", {}))
+        renderer = PillowTextRenderer(font_path=Path(options.font_path) if options.font_path else None,
+                                      min_font_size=options.min_font_size, max_font_size=options.max_font_size)
+        rendered = await renderer.render(inpainted, render_regions)
+        rendered = restore_protected(rendered, image, protected)
+        translated_path = task_output / "translated" / f"{metadata_path.stem}_translated.png"
+        translated_path.parent.mkdir(parents=True, exist_ok=True)
+        PagePipeline._write_image(translated_path, rendered)
+        document["regions"] = [asdict(region) for region in regions]
+        document["render_settings"] = options.render_settings()
+        document["original_available"] = original_available
+        write_bytes(metadata_path, json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8"))
+        return translated_path
+
+    def _lama_model_identity(self) -> tuple:
+        model = self.paths.models_dir / "lama.onnx"
+        try:
+            state = model.stat()
+            return (str(model.resolve()), state.st_dev, state.st_ino, state.st_size, state.st_mtime_ns)
+        except OSError:
+            return (str(model.resolve()), None)
+
+    def _inpaint_signature(self, image: np.ndarray, mask: np.ndarray, protection: np.ndarray, engine: str) -> str:
+        # Hash pixels rather than source path/mtime: edits to an original or mask
+        # must invalidate the base even when the filename has not changed.
+        configuration = {"version": 1, "opencv": cv2.__version__, "engine": engine,
+                         "model": self._lama_model_identity() if engine == "lama_onnx" else None,
+                         "shape": image.shape, "dilation": 5, "protection_dilation": 1}
+        digest = hashlib.sha256(json.dumps(configuration, sort_keys=True).encode())
+        for pixels in (image, mask, protection):
+            digest.update(memoryview(np.ascontiguousarray(pixels)))
+        return digest.hexdigest()
+
+    @staticmethod
+    def _read_inpaint_cache(path: Path, document: dict, signature: str, shape: tuple) -> np.ndarray | None:
+        cached = document.get("inpaint_cache")
+        if not isinstance(cached, dict) or cached.get("version") != 1 or cached.get("signature") != signature:
+            return None
+        try:
+            data = path.read_bytes()
+            if hashlib.sha256(data).hexdigest() != cached.get("artifact_sha256"):
+                return None
+            image = decode_image(data, path.name)
+            return image if image.shape == shape else None
+        except (OSError, ValueError, cv2.error):
+            return None
+
     def load_api_config(self) -> dict[str, object]:
+        """读取旧版单通道配置，密钥只以布尔标记返回。"""
         loaded: dict[str, object] = {
             key: self.database.get_setting(f"api.{key}", str(default))
             for key, default in self.DEFAULT_API.items()
@@ -85,58 +379,220 @@ class TranslationApplication:
         return loaded
 
     def revoke_api_key(self) -> None:
+        """撤销默认通道保存的本地 API 密钥。"""
         self.credentials.revoke(self.CHANNEL_ID)
         self.logger.info("已撤销本地保存的API Key")
 
+    def revoke_api_channel_key(self, channel_id: str) -> None:
+        """撤销指定 API 通道保存的本地密钥。"""
+        self.credentials.revoke(channel_id)
+        self.logger.info(f"已撤销API通道密钥：{channel_id}")
+
+    def list_api_channels(self) -> list[ApiChannelRecord]:
+        """列出全部 API 通道配置。"""
+        return self.database.list_api_channels()
+
+    def validate_translation_configuration(self) -> None:
+        """Validate local API setup without sending any network requests."""
+        channels = self.database.list_api_channels(enabled_only=True)
+        if not channels:
+            raise ValueError("尚未配置可用的API通道。请先在“API管理”中保存并测试，或关闭“调用AI翻译”进行离线识别。")
+        verified = [channel for channel in channels if channel.verified]
+        if not verified:
+            raise ValueError("没有验证通过的API通道，请先在“API管理”中测试连通性。")
+        if not any(self.credentials.load(channel.id) for channel in verified):
+            raise ValueError("当前Windows账号未保存API Key，请在“API管理”中重新安全保存密钥。")
+
     def build_translator(self) -> CachedTranslator:
-        api = self.load_api_config()
-        api_key = self.credentials.load(self.CHANNEL_ID)
-        if not api_key:
-            raise ValueError("尚未保存API Key，请先到API管理页面配置")
-        config = OpenAICompatibleConfig(
-            service_name=str(api["service_name"]),
-            api_key=api_key,
-            base_url=str(api["base_url"]),
-            model=str(api["model"]),
-            timeout_seconds=float(api["timeout_seconds"]),
-            retries=int(api["retries"]),
-        )
-        delegate = OpenAICompatibleTranslator(config)
-        return CachedTranslator(
-            self.database,
-            delegate,
-            provider=config.service_name,
-            model=config.model,
+        """装配带 SQLite 缓存的多通道路由翻译器。"""
+        channels = self.database.list_api_channels(enabled_only=True)
+        if not channels:
+            raise ValueError("尚未配置可用的API通道")
+
+        def content(category: str) -> str:
+            return "\n".join(entry.payload for entry in self.list_library_content(category) if entry.enabled)
+
+        settings = TranslationSettings(
+            prompt=content("prompt"), glossary=parse_pairs(content("glossary"), glossary=True),
+            replacements=parse_pairs(content("replacement"), glossary=False),
         )
 
-    def build_pipeline(self, *, translate: bool = True) -> PagePipeline:
+        def factory(channel: ApiChannelRecord, api_key: str) -> OpenAICompatibleTranslator:
+            return OpenAICompatibleTranslator(
+                OpenAICompatibleConfig(
+                    service_name=channel.service_name,
+                    api_key=api_key,
+                    base_url=channel.base_url,
+                    model=channel.model,
+                    timeout_seconds=channel.timeout_seconds,
+                    retries=channel.retries,
+                    system_prompt=settings.system_prompt,
+                )
+            )
+
+        delegate = ChannelRouterTranslator(self.database, self.credentials, factory)
+        route_signature = json.dumps([(channel.id, channel.base_url, channel.model) for channel in channels])
+        return CachedTranslator(
+            self.database,
+            ConfiguredTranslator(delegate, settings),
+            provider="API通道路由",
+            model=f"{route_signature}:settings:{settings.signature}",
+        )
+
+    def build_pipeline(
+        self,
+        *,
+        translate: bool = True,
+        ocr_engine: str = "rapidocr",
+        inpainting_engine: str = "opencv",
+        high_accuracy_ocr: bool = False,
+        font_path: str | None = None,
+        min_font_size: int = 10,
+        max_font_size: int = 64,
+    ) -> PagePipeline:
+        """按配置装配 OCR、擦字与渲染流水线。"""
         translator = self.build_translator() if translate else _UnusedTranslator()
-        ocr = RapidOCREngine()
+        detector_ocr = self._get_rapidocr_engine(high_accuracy_ocr=high_accuracy_ocr)
+        ocr = (
+            MangaOCREngine(self.paths.models_dir / "manga-ocr-base")
+            if ocr_engine == "mangaocr"
+            else detector_ocr
+        )
+        inpainter = self._build_inpainter(inpainting_engine)
         return PagePipeline(
-            detector=RapidOCRDetector(ocr),
+            detector=RapidOCRDetector(detector_ocr),
             ocr=ocr,
             translator=translator,
-            inpainter=OpenCVInpainter(),
-            renderer=PillowTextRenderer(),
+            inpainter=inpainter,
+            renderer=PillowTextRenderer(font_path=Path(font_path) if font_path else None,
+                                        min_font_size=min_font_size, max_font_size=max_font_size),
+        )
+
+    def _build_inpainter(self, engine: str):
+        fallback = OpenCVInpainter()
+        if engine != "lama_onnx":
+            return fallback
+        identity = self._lama_model_identity()
+        with self._lama_cache_lock:
+            if self._lama_cache is not None and self._lama_cache[0] == identity:
+                return self._lama_cache[1]
+            try:
+                inpainter = FallbackInpainter(LaMaONNXInpainter(self.paths.models_dir / "lama.onnx"), fallback)
+                # One optional model session only; replacing the model drops the
+                # old reference rather than growing an unbounded session cache.
+                self._lama_cache = (identity, inpainter)
+                return inpainter
+            except Exception as error:
+                self._lama_cache = None
+                self.logger.warning(f"LaMa不可用，已使用OpenCV：{redact_text(str(error))}")
+                return fallback
+
+    def _get_rapidocr_engine(self, *, high_accuracy_ocr: bool = False) -> RapidOCREngine:
+        det_limit_side_len = 1280 if high_accuracy_ocr else None
+        max_side_len = 4000 if high_accuracy_ocr else None
+        if self._rapidocr_engine is None:
+            self._rapidocr_engine = RapidOCREngine(
+                det_limit_side_len=det_limit_side_len,
+                max_side_len=max_side_len,
+            )
+        else:
+            self._rapidocr_engine.set_detection_config(
+                det_limit_side_len=det_limit_side_len,
+                max_side_len=max_side_len,
+            )
+        return self._rapidocr_engine
+
+    def build_task_queue(
+        self,
+        options: PipelineOptions,
+        *,
+        ocr_engine: str = "rapidocr",
+        inpainting_engine: str = "opencv",
+        high_accuracy_ocr: bool = False,
+        max_concurrent_pages: int = 1,
+        max_page_attempts: int = 3,
+        on_task_completed=None,
+        on_page_completed=None,
+        on_page_failed=None,
+        on_page_progress=None,
+    ) -> PersistentTaskQueue:
+        """装配可暂停、可恢复、失败自动重试的持久化任务队列。"""
+        pipeline = self.build_pipeline(
+            translate=options.translate,
+            ocr_engine=ocr_engine,
+            inpainting_engine=inpainting_engine,
+            high_accuracy_ocr=high_accuracy_ocr,
+            **options.render_settings(),
+        )
+
+        async def process(page, output_dir, on_progress):
+            return await pipeline.process(
+                Path(page.source_path), output_dir, options, on_progress=on_progress
+            )
+
+        return PersistentTaskQueue(
+            self.database,
+            process,
+            max_concurrent_pages=max_concurrent_pages,
+            max_page_attempts=max_page_attempts,
+            on_task_completed=(
+                on_task_completed
+                if on_task_completed is not None
+                else self.archive_originals
+            ),
+            on_page_completed=on_page_completed,
+            on_page_failed=on_page_failed,
+            on_page_progress=on_page_progress,
+            on_run_finished=getattr(pipeline.translator, "close", None),
         )
 
     async def test_api_connection(self) -> str:
-        api = self.load_api_config()
-        api_key = self.credentials.load(self.CHANNEL_ID)
+        return await self.test_api_channel(self.CHANNEL_ID)
+
+    async def list_api_channel_models(self, channel_id: str) -> list[str]:
+        channel = self.database.get_api_channel(channel_id)
+        api_key = self.credentials.load(channel_id)
         if not api_key:
             raise ValueError("尚未保存API Key")
         translator = OpenAICompatibleTranslator(
             OpenAICompatibleConfig(
-                service_name=str(api["service_name"]),
+                service_name=channel.service_name,
                 api_key=api_key,
-                base_url=str(api["base_url"]),
-                model=str(api["model"]),
-                timeout_seconds=float(api["timeout_seconds"]),
-                retries=int(api["retries"]),
+                base_url=channel.base_url,
+                model=channel.model,
+                timeout_seconds=channel.timeout_seconds,
+                retries=0,
             )
         )
         try:
-            return await translator.test_connection()
+            return await translator.list_models()
+        finally:
+            await translator.close()
+
+    async def test_api_channel(self, channel_id: str) -> str:
+        channel = self.database.get_api_channel(channel_id)
+        api_key = self.credentials.load(channel_id)
+        if not api_key:
+            raise ValueError("尚未保存API Key")
+        translator = OpenAICompatibleTranslator(
+            OpenAICompatibleConfig(
+                service_name=channel.service_name,
+                api_key=api_key,
+                base_url=channel.base_url,
+                model=channel.model,
+                timeout_seconds=channel.timeout_seconds,
+                retries=channel.retries,
+            )
+        )
+        try:
+            result = await translator.test_connection()
+            self.database.set_api_channel_health(channel_id, verified=True, last_error=None)
+            return result
+        except Exception as error:
+            self.database.set_api_channel_health(
+                channel_id, verified=False, last_error=redact_text(str(error))
+            )
+            raise
         finally:
             await translator.close()
 
@@ -149,18 +605,18 @@ class TranslationApplication:
         on_progress: ProgressCallback | None = None,
         pipeline: PagePipeline | None = None,
     ) -> ProcessingOutcome:
+        """处理单张页面并持久化检查点。"""
         task_id = self.database.create_task(str(source_path), str(output_dir))
         page_id = self.database.add_page(task_id, 0, str(source_path))
         self.database.update_task_status(task_id, TaskStatus.RUNNING)
         self.database.update_page_status(page_id, PageStatus.RUNNING, stage="准备", progress=0)
-        active_pipeline = pipeline or self.build_pipeline(translate=options.translate)
-
         def record_progress(stage: str, progress: int) -> None:
             self.database.update_page_status(page_id, PageStatus.RUNNING, stage=stage, progress=progress)
             if on_progress is not None:
                 on_progress(stage, progress)
 
         try:
+            active_pipeline = pipeline or self.build_pipeline(translate=options.translate, **options.render_settings())
             result = await active_pipeline.process(
                 source_path,
                 output_dir,
@@ -173,8 +629,10 @@ class TranslationApplication:
             self.database.update_task_status(task_id, TaskStatus.FAILED)
             self.logger.error(message)
             raise
+        self.database.set_page_result(page_id, str(result.artifacts.translated))
         self.database.update_page_status(page_id, PageStatus.COMPLETED, stage="保存", progress=100)
         self.database.update_task_status(task_id, TaskStatus.COMPLETED)
+        self.archive_originals(task_id)
         self.logger.info(f"页面处理完成：{Path(source_path).name}")
         return ProcessingOutcome(task_id=task_id, page_id=page_id, result=result)
 

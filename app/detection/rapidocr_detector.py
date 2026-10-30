@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import math
 import uuid
 
@@ -8,15 +9,19 @@ import numpy as np
 from app.domain.models import TextRegion
 from app.ocr.rapidocr_engine import RapidOCREngine
 
+from .region_merger import merge_text_regions
+
 
 class RapidOCRDetector:
+    """基于 RapidOCR 的文本框检测器，检测后复用识别结果。"""
+
     """使用PP-OCR检测框，并缓存同次推理得到的识别文本。"""
 
     def __init__(self, ocr: RapidOCREngine) -> None:
         self.ocr = ocr
 
     async def detect(self, image: np.ndarray) -> list[TextRegion]:
-        output = self.ocr._get_engine()(image)
+        output = await asyncio.to_thread(self.ocr.infer, image)
         payload = output[0] if isinstance(output, tuple) else output
         boxes = self._as_list(getattr(payload, "boxes", None))
         texts = self._as_list(getattr(payload, "txts", None))
@@ -46,7 +51,7 @@ class RapidOCRDetector:
                     },
                 )
             )
-        return regions
+        return merge_text_regions(regions)
 
     @staticmethod
     def _as_list(value) -> list:

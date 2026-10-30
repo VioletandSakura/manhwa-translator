@@ -1,6 +1,9 @@
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
+import zipfile
+
+import pytest
 
 from app.domain.enums import PageStatus, TaskStatus
 from app.paths import AppPaths
@@ -77,3 +80,57 @@ def test_process_page_updates_sqlite_checkpoints(tmp_path: Path) -> None:
     assert page.stage == "保存"
     assert page.progress == 100
 
+
+def test_application_startup_repairs_completed_task_left_running(tmp_path: Path) -> None:
+    application = _application(tmp_path)
+    task_id = application.database.create_task("page.png", "out")
+    page_id = application.database.add_page(task_id, 0, "page.png")
+    application.database.update_page_status(
+        page_id, PageStatus.COMPLETED, stage="保存", progress=100
+    )
+    application.database.update_task_status(task_id, TaskStatus.RUNNING)
+
+    application.initialize()
+
+    assert application.database.get_task(task_id).status is TaskStatus.COMPLETED
+
+
+def test_single_page_result_is_persisted_and_included_in_export(tmp_path: Path) -> None:
+    application = _application(tmp_path)
+    source = tmp_path / "single.png"
+    source.write_bytes(b"original fixture")
+    translated = tmp_path / "out" / "translated" / "single_translated.png"
+
+    class SavedPipeline:
+        async def process(self, *_args, **_kwargs):
+            translated.parent.mkdir(parents=True)
+            translated.write_bytes(b"rendered fixture")
+            return SimpleNamespace(artifacts=SimpleNamespace(translated=translated))
+
+    try:
+        outcome = asyncio.run(application.process_page(source, tmp_path / "out", PipelineOptions(translate=False),
+                                                      pipeline=SavedPipeline()))
+        assert application.database.get_page(outcome.page_id).result_path == str(translated)
+        target = application.export_task_zip(outcome.task_id, tmp_path / "export.zip")
+        with zipfile.ZipFile(target) as archive:
+            assert archive.namelist() == ["single.png"]
+            assert archive.read("single.png") == translated.read_bytes()
+    finally:
+        application.database.close()
+
+
+def test_single_page_initialization_failure_is_recorded(tmp_path: Path, monkeypatch) -> None:
+    application = _application(tmp_path)
+    def unavailable(**_kwargs):
+        raise RuntimeError("local model unavailable")
+    monkeypatch.setattr(application, "build_pipeline", unavailable)
+    try:
+        with pytest.raises(RuntimeError, match="model unavailable"):
+            asyncio.run(application.process_page(tmp_path / "page.png", tmp_path / "out", PipelineOptions(translate=False)))
+        task = application.database.list_tasks()[0]
+        page = application.database.list_task_pages(task.id)[0]
+        assert task.status is TaskStatus.FAILED
+        assert page.status is PageStatus.FAILED
+        assert "model unavailable" in page.error
+    finally:
+        application.database.close()

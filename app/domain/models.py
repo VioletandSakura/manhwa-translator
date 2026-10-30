@@ -27,6 +27,8 @@ class PageRecord:
     stage: str
     progress: int
     error: str | None
+    attempt_count: int = 0
+    result_path: str | None = None
 
 
 @dataclass(slots=True)
@@ -42,6 +44,10 @@ class TextRegion:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
+    def approved(self) -> bool:
+        return not self.needs_review and self.metadata.get("review_decision") != "rejected"
+
+    @property
     def bounds(self) -> tuple[int, int, int, int]:
         xs = [point[0] for point in self.polygon]
         ys = [point[1] for point in self.polygon]
@@ -55,3 +61,29 @@ class PageArtifacts:
     translated: Path
     metadata: Path
 
+
+@dataclass(frozen=True, slots=True)
+class ApiChannelRecord:
+    id: str
+    service_name: str
+    enabled: bool
+    base_url: str
+    model: str
+    timeout_seconds: int
+    max_concurrency: int
+    rpm_limit: int
+    retries: int
+    priority: int
+    strategy: str
+    verified: bool
+    last_error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class LibraryEntry:
+    id: str
+    category: str
+    name: str
+    payload: str
+    enabled: bool
+    sort_order: int

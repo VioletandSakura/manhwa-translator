@@ -16,10 +16,12 @@ class AppPaths:
 
     @classmethod
     def default(cls) -> "AppPaths":
+        # Keep a source checkout portable, including its existing task history.
+        root = Path(__file__).resolve().parents[1]
         return cls(
-            project_root=Path(r"D:\Chatgpt\01_Projects\manga-translator-personal"),
-            output_root=Path(r"D:\Chatgpt\04_Documents\manga-translator-results"),
-            temp_root=Path(r"D:\Chatgpt\99_Temp\manga-translator-personal"),
+            project_root=root,
+            output_root=root / "outputs",
+            temp_root=root / ".cache" / "tmp",
         )
 
     @property

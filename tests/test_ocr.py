@@ -73,3 +73,167 @@ def test_rapidocr_detector_reuses_recognition_result() -> None:
     assert recognized[0].source_text == "漫画文字"
     assert recognized[0].confidence == pytest.approx(0.88)
     assert recognized[0].metadata["detector"] == "rapidocr"
+
+
+def test_rapidocr_recognition_runs_in_worker_thread() -> None:
+    import threading
+
+    observed: list[str] = []
+
+    def engine(crop):
+        observed.append(threading.current_thread().name)
+        return SimpleNamespace(txts=["ok"], scores=[0.9])
+
+    ocr = RapidOCREngine(engine)
+
+    asyncio.run(ocr.recognize(np.zeros((50, 100, 3), dtype=np.uint8), [_region()]))
+
+    assert observed
+    assert observed[0] != threading.main_thread().name
+
+
+def test_rapidocr_pads_recognition_crop() -> None:
+    captured: list[np.ndarray] = []
+
+    def engine(crop):
+        captured.append(crop)
+        return SimpleNamespace(txts=["ok"], scores=[0.9])
+
+    ocr = RapidOCREngine(engine, crop_padding=5)
+    region = TextRegion(
+        id="padded",
+        polygon=[(20, 20), (60, 20), (60, 60), (20, 60)],
+    )
+
+    asyncio.run(ocr.recognize(np.zeros((100, 100, 3), dtype=np.uint8), [region]))
+
+    assert len(captured) == 1
+    assert captured[0].shape[:2] == (50, 50)
+
+
+def test_rapidocr_auto_padding_is_clipped_to_image() -> None:
+    captured: list[np.ndarray] = []
+
+    def engine(crop):
+        captured.append(crop)
+        return SimpleNamespace(txts=["ok"], scores=[0.9])
+
+    ocr = RapidOCREngine(engine)
+    region = TextRegion(
+        id="edge",
+        polygon=[(0, 0), (60, 0), (60, 60), (0, 60)],
+    )
+
+    asyncio.run(ocr.recognize(np.zeros((70, 70, 3), dtype=np.uint8), [region]))
+
+    assert len(captured) == 1
+    assert captured[0].shape[:2] == (64, 64)
+
+
+class _RefineEngine:
+    def __init__(self, text: str, confidence: float) -> None:
+        self.text = text
+        self.confidence = confidence
+        self.calls = 0
+
+    def recognize_txt(self, crops):
+        self.calls += 1
+        return SimpleNamespace(txts=[self.text], scores=[self.confidence])
+
+
+def _cached_region(text: str, confidence: float) -> TextRegion:
+    return TextRegion(
+        id="cached",
+        polygon=[(10, 10), (100, 10), (100, 40), (10, 40)],
+        metadata={"ocr_source_text": text, "ocr_confidence": confidence},
+    )
+
+
+def test_rapidocr_refines_low_confidence_cached_region() -> None:
+    engine = _RefineEngine("\u5165\u3063\u3066", 0.82)
+    ocr = RapidOCREngine(engine)
+    region = _cached_region("\u5165\u3066", 0.535)
+
+    regions = asyncio.run(ocr.recognize(np.zeros((60, 120, 3), dtype=np.uint8), [region]))
+
+    assert regions[0].source_text == "\u5165\u3063\u3066"
+    assert regions[0].confidence == pytest.approx(0.82)
+    assert regions[0].metadata.get("ocr_refined") is True
+    assert engine.calls == 6
+
+
+def test_rapidocr_keeps_high_confidence_cached_region_untouched() -> None:
+    engine = _RefineEngine("\u5165\u3063\u3066", 0.99)
+    ocr = RapidOCREngine(engine)
+    region = _cached_region("\u5165\u3066", 0.9)
+
+    regions = asyncio.run(ocr.recognize(np.zeros((60, 120, 3), dtype=np.uint8), [region]))
+
+    assert regions[0].source_text == "\u5165\u3066"
+    assert regions[0].confidence == pytest.approx(0.9)
+    assert "ocr_refined" not in regions[0].metadata
+    assert engine.calls == 0
+
+
+def test_rapidocr_rejects_unrelated_refinement_reading() -> None:
+    engine = _RefineEngine("213", 0.7)
+    ocr = RapidOCREngine(engine)
+    region = _cached_region("LMEIS", 0.548)
+
+    regions = asyncio.run(ocr.recognize(np.zeros((60, 120, 3), dtype=np.uint8), [region]))
+
+    assert regions[0].source_text == "LMEIS"
+    assert "ocr_refined" not in regions[0].metadata
+
+
+def test_rapidocr_engine_applies_detection_config_to_real_engine() -> None:
+    engine_obj = SimpleNamespace(
+        max_side_len=2000,
+        text_det=SimpleNamespace(limit_side_len=736),
+    )
+    ocr = RapidOCREngine(engine_obj, det_limit_side_len=1280, max_side_len=4000)
+
+    ocr._get_engine()
+
+    assert engine_obj.max_side_len == 4000
+    assert engine_obj.text_det.limit_side_len == 1280
+
+
+def test_rapidocr_engine_switches_detection_config_on_shared_instance() -> None:
+    engine_obj = SimpleNamespace(
+        max_side_len=2000,
+        text_det=SimpleNamespace(limit_side_len=736),
+    )
+    ocr = RapidOCREngine(engine_obj)
+    ocr._get_engine()
+
+    ocr.set_detection_config(det_limit_side_len=1280, max_side_len=4000)
+
+    assert engine_obj.max_side_len == 4000
+    assert engine_obj.text_det.limit_side_len == 1280
+
+    ocr.set_detection_config(det_limit_side_len=None, max_side_len=None)
+
+    assert engine_obj.max_side_len == 2000
+    assert engine_obj.text_det.limit_side_len == 736
+
+
+def test_rapidocr_detector_merges_split_bubble_boxes() -> None:
+    output = SimpleNamespace(
+        boxes=np.asarray(
+            [
+                [[10, 10], [90, 10], [90, 40], [10, 40]],
+                [[10, 50], [90, 50], [90, 80], [10, 80]],
+            ]
+        ),
+        txts=np.asarray(["\u4e00\u884c\u76ee", "\u4e8c\u884c\u76ee"]),
+        scores=np.asarray([0.9, 0.8]),
+    )
+    ocr = RapidOCREngine(lambda image: output)
+    detector = RapidOCRDetector(ocr)
+
+    regions = asyncio.run(detector.detect(np.zeros((100, 120, 3), dtype=np.uint8)))
+
+    assert len(regions) == 1
+    assert regions[0].metadata["ocr_source_text"] == "\u4e00\u884c\u76ee\n\u4e8c\u884c\u76ee"
+    assert regions[0].metadata["ocr_confidence"] == pytest.approx(0.85)

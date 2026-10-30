@@ -1,22 +1,30 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
 from app.security.redaction import redact_text
+from app.tasks.control import checkpoint, controlled_sleep
+from .settings import DEFAULT_TRANSLATION_PROMPT
 
 
 @dataclass(frozen=True, slots=True)
 class OpenAICompatibleConfig:
+    """OpenAI 兼容服务的连接配置。"""
+
     service_name: str
     api_key: str
     base_url: str
     model: str
     timeout_seconds: float = 60.0
     retries: int = 2
+    max_texts_per_request: int = 80
+    system_prompt: str = DEFAULT_TRANSLATION_PROMPT
 
     @classmethod
     def deepseek(cls, api_key: str) -> "OpenAICompatibleConfig":
@@ -24,15 +32,25 @@ class OpenAICompatibleConfig:
             service_name="DeepSeek",
             api_key=api_key,
             base_url="https://api.deepseek.com/v1",
-            model="deepseek-chat",
+            model="deepseek-flash",
         )
 
 
 class TranslationServiceError(RuntimeError):
+    """翻译服务调用失败，消息已经过敏感信息脱敏。"""
+
     pass
 
 
+class TranslationCountError(TranslationServiceError):
+    """已按小块修复仍失败时，不自动重跑整页或换通道重复计费。"""
+
+    retryable = False
+
+
 class OpenAICompatibleTranslator:
+    """调用 OpenAI 兼容聊天接口批量翻译，带限流退避与 JSON 解析。"""
+
     def __init__(
         self,
         config: OpenAICompatibleConfig,
@@ -44,12 +62,47 @@ class OpenAICompatibleTranslator:
         self._client = client or httpx.AsyncClient(timeout=config.timeout_seconds)
 
     async def close(self) -> None:
+        """关闭自建 HTTP 客户端。"""
         if self._owns_client:
             await self._client.aclose()
 
     async def test_connection(self) -> str:
-        translations = await self.translate(["connection test"], "en", "zh-Hans")
-        return translations[0]
+        """校验模型可用性，只读取模型列表，不消耗翻译额度。"""
+        available_models = await self.list_models()
+        if self.config.model not in available_models:
+            available = "、".join(available_models[:8]) or "未返回可用模型"
+            raise TranslationServiceError(
+                f"模型不存在或当前账号不可用：{self.config.model}；可用模型：{available}"
+            )
+        return self.config.model
+
+    async def list_models(self) -> list[str]:
+        """获取服务端可用模型列表。"""
+        url = f"{self.config.base_url.rstrip('/')}/models"
+        timeout_seconds = min(max(float(self.config.timeout_seconds), 5.0), 15.0)
+        try:
+            response = await self._client.get(
+                url,
+                headers={"Authorization": f"Bearer {self.config.api_key}"},
+                timeout=httpx.Timeout(timeout_seconds, connect=min(5.0, timeout_seconds)),
+            )
+        except httpx.TimeoutException as error:
+            raise TranslationServiceError(
+                f"连通性测试超时（最多{timeout_seconds:g}秒），请检查网络、代理和Base URL"
+            ) from error
+        except httpx.NetworkError as error:
+            raise TranslationServiceError("无法连接翻译服务，请检查网络、代理和Base URL") from error
+        if not response.is_success:
+            self._raise_for_status(response)
+        try:
+            available_models = {
+                str(item["id"])
+                for item in response.json()["data"]
+                if isinstance(item, dict) and item.get("id")
+            }
+        except (KeyError, TypeError, json.JSONDecodeError) as error:
+            raise TranslationServiceError("服务已连接，但模型列表格式无法识别") from error
+        return sorted(available_models)
 
     async def translate(
         self,
@@ -57,11 +110,45 @@ class OpenAICompatibleTranslator:
         source_language: str,
         target_language: str,
         *,
-        system_prompt: str = "你是专业漫画翻译员。忠实、自然地翻译，不添加解释。",
+        system_prompt: str | None = None,
         context: list[str] | None = None,
     ) -> list[str]:
         if not texts:
             return []
+        system_prompt = self.config.system_prompt if system_prompt is None else system_prompt
+        limit = max(1, self.config.max_texts_per_request)
+        if len(texts) > limit:
+            translations: list[str] = []
+            for start in range(0, len(texts), limit):
+                chunk = texts[start : start + limit]
+                translations.extend(
+                    await self._translate_once(
+                        chunk,
+                        source_language,
+                        target_language,
+                        system_prompt=system_prompt,
+                        context=context,
+                    )
+                )
+            return translations
+        return await self._translate_once(
+            texts,
+            source_language,
+            target_language,
+            system_prompt=system_prompt,
+            context=context,
+        )
+
+    async def _translate_once(
+        self,
+        texts: list[str],
+        source_language: str,
+        target_language: str,
+        *,
+        system_prompt: str,
+        context: list[str] | None,
+        repair_count: bool = True,
+    ) -> list[str]:
         payload = self._build_payload(texts, source_language, target_language, system_prompt, context)
         response = await self._request(payload)
         try:
@@ -70,8 +157,18 @@ class OpenAICompatibleTranslator:
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as error:
             raise TranslationServiceError("翻译服务返回了无法识别的数据格式") from error
         if len(translations) != len(texts):
-            raise TranslationServiceError(
+            if repair_count and len(texts) > 1:
+                middle = len(texts) // 2
+                repaired: list[str] = []
+                for chunk in (texts[:middle], texts[middle:]):
+                    repaired.extend(await self._translate_once(
+                        chunk, source_language, target_language, system_prompt=system_prompt,
+                        context=context, repair_count=False,
+                    ))
+                return repaired
+            raise TranslationCountError(
                 f"翻译条目数量不匹配：发送{len(texts)}条，收到{len(translations)}条"
+                "；本块已停止，请检查服务响应后重试（已完成块会使用缓存）"
             )
         return translations
 
@@ -83,6 +180,8 @@ class OpenAICompatibleTranslator:
         system_prompt: str,
         context: list[str] | None,
     ) -> dict[str, Any]:
+        if "json" not in system_prompt.casefold():
+            system_prompt = f"{system_prompt.rstrip()} 只输出JSON对象，不要输出Markdown代码块或额外解释。"
         request_data = {
             "source_language": source_language,
             "target_language": target_language,
@@ -90,7 +189,7 @@ class OpenAICompatibleTranslator:
             "context": context or [],
             "output_schema": {"translations": ["与texts等长的译文数组"]},
         }
-        return {
+        payload = {
             "model": self.config.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -99,6 +198,10 @@ class OpenAICompatibleTranslator:
             "temperature": 0.2,
             "response_format": {"type": "json_object"},
         }
+        if urlsplit(self.config.base_url).hostname == "api.deepseek.com":
+            # Ordinary dialogue translation should not silently use default high thinking.
+            payload["thinking"] = {"type": "disabled"}
+        return payload
 
     async def _request(self, payload: dict[str, Any]) -> httpx.Response:
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
@@ -108,10 +211,16 @@ class OpenAICompatibleTranslator:
         }
         last_error: Exception | None = None
         for attempt in range(self.config.retries + 1):
+            await checkpoint()
             try:
                 response = await self._client.post(url, headers=headers, json=payload)
                 if response.is_success:
                     return response
+                if response.status_code == 429 or response.status_code >= 500:
+                    if attempt < self.config.retries:
+                        await controlled_sleep(self._retry_delay(response, attempt))
+                        continue
+                    self._raise_for_status(response)
                 self._raise_for_status(response)
             except TranslationServiceError:
                 raise
@@ -119,7 +228,22 @@ class OpenAICompatibleTranslator:
                 last_error = error
                 if attempt >= self.config.retries:
                     raise TranslationServiceError("无法连接翻译服务，请检查网络、Base URL和超时设置") from error
+                await controlled_sleep(self._backoff_seconds(attempt))
         raise TranslationServiceError(redact_text(str(last_error or "翻译请求失败")))
+
+    @classmethod
+    def _retry_delay(cls, response: httpx.Response, attempt: int) -> float:
+        retry_after = response.headers.get("Retry-After")
+        if retry_after is not None:
+            try:
+                return min(30.0, max(0.0, float(retry_after)))
+            except ValueError:
+                pass
+        return cls._backoff_seconds(attempt)
+
+    @staticmethod
+    def _backoff_seconds(attempt: int) -> float:
+        return min(8.0, 0.5 * (2**attempt))
 
     @staticmethod
     def _raise_for_status(response: httpx.Response) -> None:
@@ -136,6 +260,14 @@ class OpenAICompatibleTranslator:
             message = "翻译服务暂时不可用"
         if message is None:
             message = f"翻译请求失败（HTTP {response.status_code}）"
+        try:
+            provider_message = response.json().get("error", {}).get("message")
+        except (AttributeError, TypeError, json.JSONDecodeError):
+            provider_message = None
+        if provider_message:
+            safe_detail = redact_text(str(provider_message)).strip()[:300]
+            if safe_detail:
+                message = f"{message}；服务端说明：{safe_detail}"
         raise TranslationServiceError(message)
 
     @staticmethod
@@ -145,7 +277,7 @@ class OpenAICompatibleTranslator:
             cleaned = cleaned.split("\n", 1)[-1]
             cleaned = cleaned.rsplit("```", 1)[0].strip()
         data = json.loads(cleaned)
-        translations = data.get("translations")
+        translations = data.get("translations") if isinstance(data, dict) else None
         if not isinstance(translations, list) or not all(isinstance(item, str) for item in translations):
             raise TranslationServiceError("翻译结果缺少translations数组")
         return translations
